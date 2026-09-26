@@ -1,0 +1,21 @@
+#!/bin/sh
+set -eu
+: "${BASELOC:?}"
+SRC="$BASELOC/o/lang/java/jdk25u-jdk-25.0.4-ga"
+ARCH=${ARCH:-x86_64}
+if [ "$ARCH" = aarch64 ]; then
+  CONF=cosmo-release-aarch64
+else
+  CONF=cosmo-release
+fi
+OUT="$BASELOC/o/lang/java/install/$ARCH"
+rm -rf "$OUT"
+mkdir -p "$OUT/bin" "$OUT/lib"
+ARCH="$ARCH" "$BASELOC/lang/java/pack-jre" "$SRC" "$OUT/bin"
+if [ "$ARCH" = x86_64 ]; then
+  "$BASELOC/lang/java/pack-module-repository" "$SRC" "$OUT/java-modules.zip"
+fi
+cp "$SRC/build/$CONF/hotspot/variant-server/libjvm/objs/static/libjvm.a" "$OUT/lib/libjvm.a"
+if [ "$ARCH" = x86_64 ] && [ -f "$BASELOC/o/lang/java/cosmo-constants.values" ]; then
+  cp "$BASELOC/o/lang/java/cosmo-constants.values" "$OUT/cosmo-constants.values"
+fi

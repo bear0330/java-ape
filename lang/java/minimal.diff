@@ -1,0 +1,2313 @@
+--- jdk25u-jdk-25.0.4-ga/make/autoconf/flags-cflags.m4
++++ jdk25u-jdk-25.0.4-ga/make/autoconf/flags-cflags.m4
+@@ -528,8 +528,13 @@
+   fi
+ 
+   if test "x$TOOLCHAIN_TYPE" = xgcc; then
+-    TOOLCHAIN_CFLAGS_JVM="$TOOLCHAIN_CFLAGS_JVM -fstack-protector"
+-    TOOLCHAIN_CFLAGS_JDK="-fvisibility=hidden -pipe -fstack-protector"
++    if test "x$COSMOPOLITAN" = xtrue; then
++      TOOLCHAIN_CFLAGS_JVM="$TOOLCHAIN_CFLAGS_JVM -fno-stack-protector"
++      TOOLCHAIN_CFLAGS_JDK="-fvisibility=hidden -pipe -fno-stack-protector"
++    else
++      TOOLCHAIN_CFLAGS_JVM="$TOOLCHAIN_CFLAGS_JVM -fstack-protector"
++      TOOLCHAIN_CFLAGS_JDK="-fvisibility=hidden -pipe -fstack-protector"
++    fi
+     # reduce lib size on linux in link step, this needs also special compile flags
+     # do this on s390x also for libjvm (where serviceability agent is not supported)
+     if test "x$ENABLE_LINKTIME_GC" = xtrue; then
+--- jdk25u-jdk-25.0.4-ga/make/autoconf/lib-freetype.m4
++++ jdk25u-jdk-25.0.4-ga/make/autoconf/lib-freetype.m4
+@@ -95,6 +95,9 @@
+   FREETYPE_CFLAGS=
+   FREETYPE_LIBS=
+ 
++  if test "x$NEEDS_LIB_FREETYPE" = "xfalse"; then
++    FREETYPE_TO_USE=none
++  else
+   if (test "x$with_freetype_include" = "x" && \
+       test "x$with_freetype_lib" != "x") || \
+       (test "x$with_freetype_include" != "x" && \
+@@ -237,6 +240,8 @@
+     fi
+   fi
+ 
++  fi
++
+   AC_MSG_RESULT([Using freetype: $FREETYPE_TO_USE])
+ 
+   AC_SUBST(FREETYPE_TO_USE)
+--- jdk25u-jdk-25.0.4-ga/make/autoconf/libraries.m4
++++ jdk25u-jdk-25.0.4-ga/make/autoconf/libraries.m4
+@@ -41,6 +41,15 @@
+ ################################################################################
+ AC_DEFUN_ONCE([LIB_DETERMINE_DEPENDENCIES],
+ [
++  AC_ARG_VAR([COSMOPOLITAN], [set to true when targeting Cosmopolitan libc])
++  if test "x$COSMOPOLITAN" = xtrue; then
++    NEEDS_LIB_X11=false
++    NEEDS_LIB_FONTCONFIG=false
++    NEEDS_LIB_CUPS=false
++    NEEDS_LIB_FREETYPE=false
++    NEEDS_LIB_ALSA=false
++    NEEDS_LIB_FFI=false
++  else
+   # Check if X11 is needed
+   if test "x$OPENJDK_TARGET_OS" = xwindows ||
+      test "x$OPENJDK_TARGET_OS" = xmacosx ||
+@@ -87,6 +96,7 @@
+   else
+     NEEDS_LIB_FFI=false
+   fi
++  fi
+ ])
+ 
+ ################################################################################
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
+@@ -97,6 +97,20 @@
+ # include <dlfcn.h>
+ # include <stdio.h>
+ # include <unistd.h>
++
++#ifdef __COSMOPOLITAN__
++# include <libc/dce.h>
++# include <libc/nt/enum/memflags.h>
++# include <libc/nt/enum/pageflags.h>
++# include <libc/runtime/runtime.h>
++extern "C" void* VirtualAlloc(void*, uint64_t, uint32_t, uint32_t);
++extern "C" int32_t VirtualFree(void*, uint64_t, uint32_t);
++extern "C" int32_t VirtualProtect(void*, uint64_t, uint32_t, uint32_t*);
++# define Symbol CosmoExecutableSymbol
++# include <cosmo.h>
++# undef Symbol
++
++#endif
+ # include <sys/resource.h>
+ # include <pthread.h>
+ # include <sys/stat.h>
+@@ -115,7 +155,11 @@
+ # include <stdint.h>
+ # include <inttypes.h>
+ # include <sys/ioctl.h>
+-# include <linux/elf-em.h>
++# ifdef __COSMOPOLITAN__
++#  include <elf.h>
++# else
++#  include <linux/elf-em.h>
++# endif
+ # include <sys/prctl.h>
+ #ifdef __GLIBC__
+ # include <malloc.h>
+@@ -137,7 +181,7 @@
+ 
+ #define MAX_PATH    (2 * K)
+ 
+-#ifdef MUSL_LIBC
++#if defined(MUSL_LIBC) || defined(__COSMOPOLITAN__)
+ // dlvsym is not a part of POSIX
+ // and musl libc doesn't implement it.
+ static void *dlvsym(void *handle,
+@@ -613,6 +657,13 @@
+ 
+   // sysclasspath, java_home, dll_dir
+   {
++#ifdef __COSMOPOLITAN__
++    Arguments::set_dll_dir("/zip");
++    Arguments::set_java_home("/zip");
++    if (!set_boot_path('/', ':')) {
++      vm_exit_during_initialization("Failed setting boot class path.", nullptr);
++    }
++#else
+     char *pslash;
+     os::jvm_path(buf, bufsize);
+ 
+@@ -648,6 +699,7 @@
+     if (!set_boot_path('/', ':')) {
+       vm_exit_during_initialization("Failed setting boot class path.", nullptr);
+     }
++#endif
+   }
+ 
+   // Where to look for native libraries.
+@@ -690,7 +742,11 @@
+ // detecting pthread library
+ 
+ void os::Linux::libpthread_init() {
+-  // Save glibc and pthread version strings.
++  // Save libc and pthread version strings.
++#ifdef __COSMOPOLITAN__
++  os::Linux::set_libc_version("cosmopolitan");
++  os::Linux::set_libpthread_version("cosmopolitan");
++#else
+ #if !defined(_CS_GNU_LIBC_VERSION) || \
+     !defined(_CS_GNU_LIBPTHREAD_VERSION)
+   #error "glibc too old (< 2.3.2)"
+@@ -714,6 +770,7 @@
+   confstr(_CS_GNU_LIBPTHREAD_VERSION, str, n);
+   os::Linux::set_libpthread_version(str);
+ #endif
++#endif // __COSMOPOLITAN__
+ }
+ 
+ /////////////////////////////////////////////////////////////////////////////
+@@ -1726,6 +1783,11 @@
+     return result;
+   }
+ 
++#ifdef __COSMOPOLITAN__
++  // Cosmopolitan does not use the host ELF dynamic-loader ABI.
++  // The static JRE has no useful additional ELF diagnostics here.
++  return nullptr;
++#else
+   Elf32_Ehdr elf_head;
+   size_t prefix_len = strlen(ebuf);
+   ssize_t diag_msg_max_length = ebuflen - prefix_len;
+@@ -1914,6 +1976,7 @@
+   }
+ 
+   return nullptr;
++#endif // __COSMOPOLITAN__
+ }
+ 
+ void * os::Linux::dlopen_helper(const char *filename, char *ebuf, int ebuflen) {
+@@ -2031,6 +2094,9 @@
+ }
+ 
+ const char* os::Linux::dll_path(void* lib) {
++#ifdef __COSMOPOLITAN__
++  return nullptr;
++#else
+   struct link_map *lmap;
+   const char* l_path = nullptr;
+   assert(lib != nullptr, "dll_path parameter must not be null");
+@@ -2040,6 +2106,7 @@
+     l_path = lmap->l_name;
+   }
+   return l_path;
++#endif
+ }
+ 
+ static unsigned count_newlines(const char* s) {
+@@ -2975,6 +3042,38 @@
+ //       problem.
+ int os::Linux::commit_memory_impl(char* addr, size_t size, bool exec) {
+   int prot = exec ? PROT_READ|PROT_WRITE|PROT_EXEC : PROT_READ|PROT_WRITE;
++#ifdef __COSMOPOLITAN__
++  if (IsXnu() && exec) {
++    // Do not replace MAP_JIT mappings, see JDK-8234930.
++    if (::mprotect(addr, size, prot) == 0) {
++      return 0;
++    }
++    int err = errno;
++    if (!recoverable_mmap_error(err)) {
++      warn_fail_commit_memory(addr, size, exec, err);
++      vm_exit_out_of_memory(size, OOM_MMAP_ERROR, "committing reserved memory.");
++    }
++    return err;
++  }
++  if (IsWindows()) {
++    // Use the same reserve/commit model as HotSpot's native Windows port.
++    // The address range was reserved with VirtualAlloc(MEM_RESERVE), so
++    // commit physical pages with MEM_COMMIT at normal 4 KiB page granularity.
++    // Executable memory is committed RW first and then switched to RWX,
++    // matching OpenJDK's Windows implementation and avoiding Cosmopolitan
++    // mmap/mprotect bookkeeping for the JIT code cache.
++    if (VirtualAlloc(addr, size, kNtMemCommit, kNtPageReadwrite) == nullptr) {
++      return EACCES;
++    }
++    if (exec) {
++      uint32_t old_prot = 0;
++      if (!VirtualProtect(addr, size, kNtPageExecuteReadwrite, &old_prot)) {
++        return EACCES;
++      }
++    }
++    return 0;
++  }
++#endif
+   uintptr_t res = (uintptr_t) ::mmap(addr, size, prot,
+                                      MAP_PRIVATE|MAP_FIXED|MAP_ANONYMOUS, -1, 0);
+   if (res != (uintptr_t) MAP_FAILED) {
+@@ -3051,7 +3138,7 @@
+ #define MAP_FIXED_NOREPLACE_value 0x100000
+ #ifndef MAP_FIXED_NOREPLACE
+   #define MAP_FIXED_NOREPLACE MAP_FIXED_NOREPLACE_value
+-#else
++#elif !defined(__COSMOPOLITAN__)
+   // Sanity-check our assumed default value if we build with a new enough libc.
+   STATIC_ASSERT(MAP_FIXED_NOREPLACE == MAP_FIXED_NOREPLACE_value);
+ #endif
+@@ -3213,6 +3300,9 @@
+ }
+ 
+ int os::Linux::sched_getcpu_syscall(void) {
++#ifdef __COSMOPOLITAN__
++  return ::sched_getcpu();
++#else
+   unsigned int cpu = 0;
+   long retval = -1;
+ 
+@@ -3234,9 +3324,13 @@
+ #endif
+ 
+   return (retval == -1) ? -1 : cpu;
++#endif
+ }
+ 
+ void os::Linux::sched_getcpu_init() {
++#ifdef __COSMOPOLITAN__
++  set_sched_getcpu(CAST_TO_FN_PTR(sched_getcpu_func_t, (void*)&::sched_getcpu));
++#else
+   // sched_getcpu() should be in libc.
+   set_sched_getcpu(CAST_TO_FN_PTR(sched_getcpu_func_t,
+                                   dlsym(RTLD_DEFAULT, "sched_getcpu")));
+@@ -3250,6 +3344,7 @@
+   if (sched_getcpu() == -1) {
+     vm_exit_during_initialization("getcpu(2) system call not supported by kernel");
+   }
++#endif
+ }
+ 
+ // Something to do with the numa-aware allocator needs these symbols
+@@ -3528,6 +3623,16 @@
+ struct bitmask* os::Linux::_numa_cpunodebind_bitmask;
+ 
+ bool os::pd_uncommit_memory(char* addr, size_t size, bool exec) {
++#ifdef __COSMOPOLITAN__
++  if (IsXnu() && exec) {
++    return ::mprotect(addr, size, PROT_NONE) == 0;
++  }
++  if (IsWindows()) {
++    // Keep the address reservation, but release committed physical pages.
++    // This is the native Windows HotSpot semantics for uncommit.
++    return VirtualFree(addr, size, kNtMemDecommit) != 0;
++  }
++#endif
+   uintptr_t res = (uintptr_t) ::mmap(addr, size, PROT_NONE,
+                                      MAP_PRIVATE|MAP_FIXED|MAP_NORESERVE|MAP_ANONYMOUS, -1, 0);
+   if (res == (uintptr_t) MAP_FAILED) {
+@@ -3613,6 +3715,15 @@
+ // mapping. This only affects the main/primordial thread
+ 
+ bool os::pd_create_stack_guard_pages(char* addr, size_t size) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    // The primordial/thread stack is reserved by the Windows runtime rather
++    // than by Cosmopolitan mmap(), and its low guard pages may still be only
++    // reserved.  Commit those pages directly, matching HotSpot's native
++    // Windows port, before guard_memory() changes their protection.
++    return VirtualAlloc(addr, size, kNtMemCommit, kNtPageReadwrite) != nullptr;
++  }
++#endif
+   if (os::is_primordial_thread()) {
+     // As we manually grow stack up to bottom inside create_attached_thread(),
+     // it's likely that os::Linux::initial_thread_stack_bottom is mapped and
+@@ -3646,6 +3757,12 @@
+ // always place it right after end of the mapped region.
+ 
+ bool os::remove_stack_guard_pages(char* addr, size_t size) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    // Mirror the native Windows HotSpot behavior for stack guard pages.
++    return VirtualFree(addr, size, kNtMemDecommit) != 0;
++  }
++#endif
+   uintptr_t stack_extent, stack_base;
+ 
+   if (os::is_primordial_thread()) {
+@@ -3757,10 +3874,28 @@
+ }
+ 
+ char* os::pd_reserve_memory(size_t bytes, bool exec) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    // Windows executable mappings need to remain executable across CodeHeap
++    // growth.  Reserve+commit executable regions up front so the whole JIT
++    // code cache has stable RX/RW protection from the moment it is created.
++    // HotSpot still tracks logical committed size independently and later
++    // MEM_COMMIT calls are harmless for already committed pages.
++    const uint32_t alloc_type = exec ? (kNtMemReserve | kNtMemCommit) : kNtMemReserve;
++    const uint32_t protect = exec ? kNtPageExecuteReadwrite : kNtPageReadwrite;
++    return (char*)VirtualAlloc(nullptr, bytes, alloc_type, protect);
++  }
++#endif
+-  return anon_mmap(nullptr, bytes);
++  return anon_mmap(nullptr, bytes, exec);
+ }
+ 
+ bool os::pd_release_memory(char* addr, size_t size) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    // MEM_RELEASE requires size == 0 and releases the whole reservation.
++    return VirtualFree(addr, 0, kNtMemRelease) != 0;
++  }
++#endif
+   return anon_munmap(addr, size);
+ }
+ 
+@@ -3792,6 +3927,26 @@
+ // Set protections specified
+ bool os::protect_memory(char* addr, size_t bytes, ProtType prot,
+                         bool is_committed) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    uint32_t p = 0;
++    switch (prot) {
++    case MEM_PROT_NONE: p = kNtPageNoaccess; break;
++    case MEM_PROT_READ: p = kNtPageReadonly; break;
++    case MEM_PROT_RW:   p = kNtPageReadwrite; break;
++    case MEM_PROT_RWX:  p = kNtPageExecuteReadwrite; break;
++    default:
++      ShouldNotReachHere();
++    }
++    if (!is_committed) {
++      if (!pd_commit_memory(addr, bytes, prot == MEM_PROT_RWX)) {
++        return false;
++      }
++    }
++    uint32_t old_prot = 0;
++    return VirtualProtect(addr, bytes, p, &old_prot) != 0;
++  }
++#endif
+   unsigned int p = 0;
+   switch (prot) {
+   case MEM_PROT_NONE: p = PROT_NONE; break;
+@@ -3801,15 +3956,27 @@
+   default:
+     ShouldNotReachHere();
+   }
+-  // is_committed is unused.
++  // is_committed is unused on the POSIX backend.
+   return linux_mprotect(addr, bytes, p);
+ }
+ 
+ bool os::guard_memory(char* addr, size_t size) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    uint32_t old_prot = 0;
++    return VirtualProtect(addr, size, kNtPageNoaccess, &old_prot) != 0;
++  }
++#endif
+   return linux_mprotect(addr, size, PROT_NONE);
+ }
+ 
+ bool os::unguard_memory(char* addr, size_t size) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    uint32_t old_prot = 0;
++    return VirtualProtect(addr, size, kNtPageReadwrite, &old_prot) != 0;
++  }
++#endif
+   return linux_mprotect(addr, size, PROT_READ|PROT_WRITE);
+ }
+ 
+@@ -4251,6 +4418,18 @@
+ // available (and not reserved for something else).
+ 
+ char* os::pd_attempt_reserve_memory_at(char* requested_addr, size_t bytes, bool exec) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    assert(bytes % os::vm_page_size() == 0, "reserving unexpected size block");
++    // VirtualAlloc treats a non-null reserve address as exact (rounded down
++    // to allocation granularity); HotSpot supplies allocation-granularity
++    // aligned hints once os::init() records the native Windows granularity.
++    const uint32_t alloc_type = exec ? (kNtMemReserve | kNtMemCommit) : kNtMemReserve;
++    const uint32_t protect = exec ? kNtPageExecuteReadwrite : kNtPageReadwrite;
++    char* result = (char*)VirtualAlloc(requested_addr, bytes, alloc_type, protect);
++    return result == requested_addr ? result : nullptr;
++  }
++#endif
+   // Assert only that the size is a multiple of the page size, since
+   // that's all that mmap requires, and since that's all we really know
+   // about at this low abstraction level.  If we need higher alignment,
+@@ -4469,7 +4648,17 @@
+   }
+   size_t page_size = sys_pg_size;
+   OSInfo::set_vm_page_size(page_size);
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    // Cosmopolitan exposes the host virtual-allocation granularity directly.
++    // This is 64 KiB on Windows, distinct from the normal 4 KiB page size.
++    OSInfo::set_vm_allocation_granularity(getgransize());
++  } else {
++    OSInfo::set_vm_allocation_granularity(page_size);
++  }
++#else
+   OSInfo::set_vm_allocation_granularity(page_size);
++#endif
+   if (os::vm_page_size() == 0) {
+     fatal("os_linux.cpp: os::init: OSInfo::set_vm_page_size failed");
+   }
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/waitBarrier_linux.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/waitBarrier_linux.cpp
+@@ -26,8 +26,14 @@
+ #include "runtime/os.hpp"
+ #include "utilities/debug.hpp"
+ #include "waitBarrier_linux.hpp"
++#ifdef __COSMOPOLITAN__
++#include <cosmo.h>
++enum { JDK_FUTEX_WAIT = 0, JDK_FUTEX_WAKE = 1 };
++#else
+ #include <sys/syscall.h>
+ #include <linux/futex.h>
++enum { JDK_FUTEX_WAIT = FUTEX_WAIT_PRIVATE, JDK_FUTEX_WAKE = FUTEX_WAKE_PRIVATE };
++#endif
+ 
+ // 32-bit RISC-V has no SYS_futex syscall.
+ #ifdef RISCV32
+@@ -37,7 +43,18 @@
+ #endif
+ 
+ static long futex(volatile int *addr, int futex_op, int op_arg) {
++#ifdef __COSMOPOLITAN__
++  if (futex_op == JDK_FUTEX_WAKE) {
++    return cosmo_futex_wake((int*)addr, op_arg, 0);
++  }
++  if (futex_op == JDK_FUTEX_WAIT) {
++    return cosmo_futex_wait((int*)addr, op_arg, 0, 0, nullptr);
++  }
++  errno = EINVAL;
++  return -1;
++#else
+   return syscall(SYS_futex, addr, futex_op, op_arg, nullptr, nullptr, 0);
++#endif
+ }
+ 
+ void LinuxWaitBarrier::arm(int barrier_tag) {
+@@ -51,7 +68,7 @@
+   assert(_futex_barrier != 0, "Should be armed/non-zero.");
+   _futex_barrier = 0;
+   long s = futex(&_futex_barrier,
+-                 FUTEX_WAKE_PRIVATE,
++                 JDK_FUTEX_WAKE,
+                  INT_MAX /* wake a max of this many threads */);
+   guarantee_with_errno(s > -1, "futex FUTEX_WAKE failed");
+ }
+@@ -65,7 +82,7 @@
+   }
+   do {
+     long s = futex(&_futex_barrier,
+-                   FUTEX_WAIT_PRIVATE,
++                   JDK_FUTEX_WAIT,
+                    barrier_tag /* should be this tag */);
+     guarantee_with_errno((s == 0) ||
+                          (s == -1 && errno == EAGAIN) ||
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/posix/attachListener_posix.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/posix/attachListener_posix.cpp
+@@ -266,7 +266,7 @@
+     }
+ 
+     // get the credentials of the peer and check the effective uid/guid
+-#ifdef LINUX
++#if defined(LINUX) && !defined(__COSMOPOLITAN__)
+     struct ucred cred_info;
+     socklen_t optlen = sizeof(cred_info);
+     if (::getsockopt(s, SOL_SOCKET, SO_PEERCRED, (void *)&cred_info, &optlen) ==
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/posix/os_posix.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/posix/os_posix.cpp
+@@ -66,6 +66,11 @@
+ 
+ #include <dirent.h>
+ #include <dlfcn.h>
++#ifdef __COSMOPOLITAN__
++#define Symbol CosmoExecutableSymbol
++#include <cosmo.h>
++#undef Symbol
++#endif
+ #include <grp.h>
+ #include <locale.h>
+ #include <netdb.h>
+@@ -429,6 +434,12 @@
+     return ftruncate(fd, len);
+   }
+   return -1;
++#elif defined(__COSMOPOLITAN__)
++  off_t end = offset + len;
++  struct stat st;
++  if (fstat(fd, &st) == -1) return errno;
++  if (st.st_size >= end) return 0;
++  return ftruncate(fd, end) == 0 ? 0 : errno;
+ #else
+   return posix_fallocate(fd, offset, len);
+ #endif
+@@ -513,6 +524,42 @@
+ // so on posix, unmap the section at the start and at the end of the chunk that we mapped
+ // rather than unmapping and remapping the whole chunk to get requested alignment.
+ char* os::reserve_memory_aligned(size_t size, size_t alignment, MemTag mem_tag, bool exec) {
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    // Windows VirtualAlloc reservations cannot be partially released.  The
++    // generic POSIX algorithm reserves a larger area and then chops the
++    // leading/trailing pieces with release_memory(), but MEM_RELEASE would
++    // release the *entire* reservation on Windows.  Use the native Windows
++    // HotSpot strategy instead: reserve a larger range to discover an aligned
++    // hole, release that whole range, then reserve exactly the aligned span.
++    assert(is_aligned(alignment, os::vm_allocation_granularity()),
++           "alignment must match Windows allocation granularity");
++    assert(is_aligned(size, os::vm_allocation_granularity()),
++           "size must match Windows allocation granularity");
++
++    const size_t extra_size = size + alignment;
++    if (extra_size < size) {
++      return nullptr;
++    }
++
++    static const int max_attempts = 20;
++    for (int attempt = 0; attempt < max_attempts; attempt++) {
++      char* extra_base = os::reserve_memory(extra_size, mem_tag, exec);
++      if (extra_base == nullptr) {
++        return nullptr;
++      }
++      char* aligned_base = align_up(extra_base, alignment);
++      if (!os::release_memory(extra_base, extra_size)) {
++        return nullptr;
++      }
++      char* result = os::attempt_reserve_memory_at(aligned_base, size, mem_tag, exec);
++      if (result != nullptr) {
++        return result;
++      }
++    }
++    return nullptr;
++  }
++#endif
+   size_t extra_size = calculate_aligned_extra_size(size, alignment);
+   char* extra_base = os::reserve_memory(extra_size, mem_tag, exec);
+   if (extra_base == nullptr) {
+@@ -813,8 +860,25 @@
+ #endif
+ }
+ 
++#ifdef __COSMOPOLITAN__
++static void* cosmo_lookup_static_symbol(const char* name) {
++  SymbolTable* st = GetSymbolTable();
++  if (st == nullptr) return nullptr;
++  for (uint64_t i = 0; i < st->count; ++i) {
++    const char* symbol_name = st->name_base + st->names[i];
++    if (::strcmp(symbol_name, name) == 0) {
++      return (void*)(st->addr_base + st->symbols[i].x);
++    }
++  }
++  return nullptr;
++}
++#endif
++
+ void* os::get_default_process_handle() {
+-#ifdef __APPLE__
++#ifdef __COSMOPOLITAN__
++  // A non-null sentinel understood by os::dll_lookup().
++  return (void*)1;
++#elif defined(__APPLE__)
+   // MacOS X needs to use RTLD_FIRST instead of RTLD_LAZY
+   // to avoid finding unexpected symbols on second (or later)
+   // loads of a library.
+@@ -825,6 +889,11 @@
+ }
+ 
+ void* os::dll_lookup(void* handle, const char* name) {
++#ifdef __COSMOPOLITAN__
++  if (handle == (void*)1 || handle == nullptr || handle == RTLD_DEFAULT) {
++    return cosmo_lookup_static_symbol(name);
++  }
++#endif
+   ::dlerror(); // Clear any previous error
+   void* ret = ::dlsym(handle, name);
+   if (ret == nullptr) {
+@@ -878,7 +947,11 @@
+ void* os::lookup_function(const char* name) {
+   // This returns the global symbol in the main executable and its dependencies,
+   // as well as shared objects dynamically loaded with RTLD_GLOBAL flag.
++#ifdef __COSMOPOLITAN__
++  return cosmo_lookup_static_symbol(name);
++#else
+   return dlsym(RTLD_DEFAULT, name);
++#endif
+ }
+ 
+ int64_t os::ftell(FILE* file) {
+@@ -1236,7 +1309,11 @@
+                       "enabled executable stack (see man page execstack(8))");
+ 
+   } else {
+-#ifdef LINUX
++#ifdef __COSMOPOLITAN__
++    // Cosmopolitan pthread stacks are fully mmap'd.  The Linux
++    // MAP_GROWSDOWN expand path returns true and retries the faulting
++    // instruction; on XNU that hangs inside javaSignalHandler.
++#elif defined(LINUX)
+     // This only works with os::Linux::manually_expand_stack()
+ 
+     // Accessing stack address below sp may cause SEGV if current
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_x86/os_linux_x86.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_x86/os_linux_x86.cpp
+@@ -73,6 +73,15 @@
+ # include <pwd.h>
+ # include <poll.h>
+ # include <ucontext.h>
++#ifdef __COSMOPOLITAN__
++# include <libc/nt/enum/pageflags.h>
++# include <libc/nt/struct/memorybasicinformation.h>
++extern "C" uint64_t VirtualQuery(const void*, struct NtMemoryBasicInformation*, uint64_t);
++extern "C" int32_t VirtualProtect(void*, uint64_t, uint32_t, uint32_t*);
++# define Symbol CosmoExecutableSymbol
++# include <cosmo.h>
++# undef Symbol
++#endif
+ #ifndef AMD64
+ # include <fpu_control.h>
+ #endif
+@@ -228,6 +237,39 @@
+ 
+   address pc          = nullptr;
+ 
++#ifdef __COSMOPOLITAN__
++  // On Windows, Cosmopolitan translates NT access violations into POSIX
++  // SIGSEGV.  In rare cases a HotSpot CodeCache page can arrive here without
++  // an executable page protection even though the code reservation is meant
++  // to be executable.  Do not infer this solely from si_addr: inspect the NT
++  // page protection directly.  If and only if the fault address is the PC,
++  // the PC belongs to the CodeCache, and VirtualQuery says that page is not
++  // executable, restore RWX and retry the instruction.  If the page is
++  // already executable, leave the signal untouched so ordinary implicit-null
++  // checks and other HotSpot signal paths retain their normal semantics.
++  if (sig == SIGSEGV && info != nullptr && uc != nullptr && IsWindows()) {
++    address win_pc = (address)os::Posix::ucontext_get_pc(uc);
++    if ((address)info->si_addr == win_pc && CodeCache::contains(win_pc)) {
++      struct NtMemoryBasicInformation mbi;
++      if (VirtualQuery(win_pc, &mbi, sizeof(mbi)) == sizeof(mbi)) {
++        const uint32_t prot = mbi.Protect & 0xff;
++        const bool executable =
++            prot == kNtPageExecute ||
++            prot == kNtPageExecuteRead ||
++            prot == kNtPageExecuteReadwrite ||
++            prot == kNtPageExecuteWritecopy;
++        if (!executable) {
++          uint32_t old_prot = 0;
++          if (VirtualProtect(mbi.BaseAddress, mbi.RegionSize,
++                             kNtPageExecuteReadwrite, &old_prot)) {
++            return true;
++          }
++        }
++      }
++    }
++  }
++#endif
++
+   //%note os_trap_1
+   if (info != nullptr && uc != nullptr && thread != nullptr) {
+     pc = (address) os::Posix::ucontext_get_pc(uc);
+@@ -323,6 +365,34 @@
+                  MacroAssembler::uses_implicit_null_check(info->si_addr)) {
+           // Determination of interpreter/vtable stub/compiled code null exception
+           stub = SharedRuntime::continuation_for_implicit_exception(thread, pc, SharedRuntime::IMPLICIT_NULL);
++#ifdef __COSMOPOLITAN__
++      } else if (sig == SIGSEGV && IsWindows() && CodeCache::contains(pc)) {
++          // Cosmopolitan's Win32 exception-to-signal bridge can report the
++          // instruction address in si_addr for an access violation whose
++          // actual data address is a null-page reference.  HotSpot normally
++          // recognizes implicit null checks by testing si_addr, which then
++          // misclassifies valid compiled null checks as fatal VM crashes.
++          //
++          // Do not guess from the instruction bytes.  The nmethod carries an
++          // ImplicitExceptionTable keyed by the faulting PC.  Asking
++          // continuation_for_implicit_exception() is therefore conservative:
++          // it returns a continuation only for a PC HotSpot itself recorded as
++          // an implicit-null site; unexpected CodeCache faults still return
++          // nullptr and fall through to normal fatal-error handling.
++          struct NtMemoryBasicInformation mbi;
++          if (VirtualQuery(pc, &mbi, sizeof(mbi)) == sizeof(mbi)) {
++            const uint32_t prot = mbi.Protect & 0xff;
++            const bool executable =
++                prot == kNtPageExecute ||
++                prot == kNtPageExecuteRead ||
++                prot == kNtPageExecuteReadwrite ||
++                prot == kNtPageExecuteWritecopy;
++            if (executable) {
++              stub = SharedRuntime::continuation_for_implicit_exception(
++                  thread, pc, SharedRuntime::IMPLICIT_NULL);
++            }
++          }
++#endif
+       }
+     } else if ((thread->thread_state() == _thread_in_vm ||
+                 thread->thread_state() == _thread_in_native) &&
+@@ -595,6 +665,20 @@
+   st->print(", ERR=" INTPTR_FORMAT, (intptr_t)uc->uc_mcontext.gregs[REG_ERR]);
+   st->cr();
+   st->print("  TRAPNO=" INTPTR_FORMAT, (intptr_t)uc->uc_mcontext.gregs[REG_TRAPNO]);
++#ifdef __COSMOPOLITAN__
++  if (IsWindows()) {
++    struct NtMemoryBasicInformation mbi;
++    address rip = (address)uc->uc_mcontext.gregs[REG_RIP];
++    if (VirtualQuery(rip, &mbi, sizeof(mbi)) == sizeof(mbi)) {
++      st->cr();
++      st->print("  WINMEM RIP region: base=" INTPTR_FORMAT
++                " size=" UINT64_FORMAT_X_0
++                " protect=0x%x alloc_protect=0x%x state=0x%x type=0x%x",
++                p2i(mbi.BaseAddress), (uint64_t)mbi.RegionSize, mbi.Protect,
++                mbi.AllocationProtect, mbi.State, mbi.Type);
++    }
++  }
++#endif
+   // Add XMM registers + MXCSR. Note that C2 uses XMM to spill GPR values including pointers.
+   st->cr();
+   st->cr();
+@@ -605,7 +689,11 @@
+                  p2i(uc->uc_mcontext.fpregs), p2i(uc));
+   } else {
+     for (int i = 0; i < 16; ++i) {
++#ifdef __COSMOPOLITAN__
++      const int64_t* xmm_val_addr = (int64_t*)&(uc->uc_mcontext.fpregs->xmm[i]);
++#else
+       const int64_t* xmm_val_addr = (int64_t*)&(uc->uc_mcontext.fpregs->_xmm[i]);
++#endif
+       st->print_cr("XMM[%d]=" INTPTR_FORMAT " " INTPTR_FORMAT, i, xmm_val_addr[1], xmm_val_addr[0]);
+     }
+     st->print("  MXCSR=" UINT32_FORMAT_X_0, uc->uc_mcontext.fpregs->mxcsr);
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/classfile/classFileParser.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/classfile/classFileParser.cpp
+@@ -1808,87 +1808,87 @@
+                                       const bool can_access_vm_annotations) {
+   const vmSymbolID sid = vmSymbols::find_sid(name);
+   // Privileged code can use all annotations.  Other code silently drops some.
+-  const bool privileged = loader_data->is_boot_class_loader_data() ||
++  const bool is_privileged_loader = loader_data->is_boot_class_loader_data() ||
+                           loader_data->is_platform_class_loader_data() ||
+                           can_access_vm_annotations;
+   switch (sid) {
+     case VM_SYMBOL_ENUM_NAME(reflect_CallerSensitive_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_CallerSensitive;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_ForceInline_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_ForceInline;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_DontInline_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_DontInline;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_ChangesCurrentThread_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_ChangesCurrentThread;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_JvmtiHideEvents_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_JvmtiHideEvents;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_JvmtiMountTransition_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_JvmtiMountTransition;
+     }
+     case VM_SYMBOL_ENUM_NAME(java_lang_invoke_InjectedProfile_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_InjectedProfile;
+     }
+     case VM_SYMBOL_ENUM_NAME(java_lang_invoke_LambdaForm_Compiled_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_LambdaForm_Compiled;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_Hidden_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_Hidden;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_misc_Scoped_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_Scoped;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_IntrinsicCandidate_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _method_IntrinsicCandidate;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_Stable_signature): {
+       if (_location != _in_field)   break;  // only allow for fields
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _field_Stable;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_Contended_signature): {
+       if (_location != _in_field && _location != _in_class) {
+         break;  // only allow for fields and classes
+       }
+-      if (!EnableContended || (RestrictContended && !privileged)) {
++      if (!EnableContended || (RestrictContended && !is_privileged_loader)) {
+         break;  // honor privileges
+       }
+       return _jdk_internal_vm_annotation_Contended;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_vm_annotation_ReservedStackAccess_signature): {
+       if (_location != _in_method)  break;  // only allow for methods
+-      if (RestrictReservedStack && !privileged) break; // honor privileges
++      if (RestrictReservedStack && !is_privileged_loader) break; // honor privileges
+       return _jdk_internal_vm_annotation_ReservedStackAccess;
+     }
+     case VM_SYMBOL_ENUM_NAME(jdk_internal_ValueBased_signature): {
+       if (_location != _in_class)   break;  // only allow for classes
+-      if (!privileged)              break;  // only allow in privileged code
++      if (!is_privileged_loader)              break;  // only allow in is_privileged_loader code
+       return _jdk_internal_ValueBased;
+     }
+     case VM_SYMBOL_ENUM_NAME(java_lang_Deprecated): {
+--- jdk25u-jdk-25.0.4-ga/src/java.base/linux/classes/sun/nio/ch/DefaultSelectorProvider.java
++++ jdk25u-jdk-25.0.4-ga/src/java.base/linux/classes/sun/nio/ch/DefaultSelectorProvider.java
+@@ -30,7 +30,7 @@
+  */
+ 
+ public class DefaultSelectorProvider {
+-    private static final SelectorProviderImpl INSTANCE = new EPollSelectorProvider();
++    private static final SelectorProviderImpl INSTANCE = new PollSelectorProvider();
+ 
+     /**
+      * Prevent instantiation.
+--- jdk25u-jdk-25.0.4-ga/src/java.base/linux/classes/sun/nio/fs/LinuxFileSystem.java
++++ jdk25u-jdk-25.0.4-ga/src/java.base/linux/classes/sun/nio/fs/LinuxFileSystem.java
+@@ -49,8 +49,7 @@
+     public WatchService newWatchService()
+         throws IOException
+     {
+-        // assume 2.6.13 or newer
+-        return new LinuxWatchService(this);
++        return new PollingWatchService();
+     }
+ 
+ 
+--- jdk25u-jdk-25.0.4-ga/src/java.base/linux/native/libnio/ch/EPoll.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/linux/native/libnio/ch/EPoll.c
+@@ -23,7 +23,9 @@
+  * questions.
+  */
+ 
+- #include <dlfcn.h>
++ #ifndef __COSMOPOLITAN__
++/* COSMOPOLITAN_EMPTY_STUB */
++#include <dlfcn.h>
+  #include <unistd.h>
+  #include <sys/types.h>
+  #include <sys/epoll.h>
+@@ -94,3 +96,5 @@
+     }
+     return res;
+ }
++
++#endif /* !__COSMOPOLITAN__ */
+--- jdk25u-jdk-25.0.4-ga/src/java.base/linux/native/libnio/ch/EventFD.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/linux/native/libnio/ch/EventFD.c
+@@ -23,7 +23,9 @@
+  * questions.
+  */
+ 
+- #include <sys/eventfd.h>
++ #ifndef __COSMOPOLITAN__
++/* COSMOPOLITAN_EMPTY_STUB */
++#include <sys/eventfd.h>
+ 
+ #include "jni.h"
+ #include "jni_util.h"
+@@ -52,3 +54,5 @@
+     return convertReturnVal(env, write(efd, (void*)&one, sizeof(uint64_t)),
+         JNI_FALSE);
+ }
++
++#endif /* !__COSMOPOLITAN__ */
+--- jdk25u-jdk-25.0.4-ga/src/java.base/linux/native/libnio/fs/LinuxWatchService.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/linux/native/libnio/fs/LinuxWatchService.c
+@@ -23,6 +23,8 @@
+  * questions.
+  */
+ 
++#ifndef __COSMOPOLITAN__
++/* COSMOPOLITAN_EMPTY_STUB */
+ #include "jni.h"
+ #include "jni_util.h"
+ #include "jvm.h"
+@@ -151,3 +153,5 @@
+      }
+     return (jint)n;
+ }
++
++#endif /* !__COSMOPOLITAN__ */
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/ProcessHandleImpl_unix.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/ProcessHandleImpl_unix.c
+@@ -222,6 +222,12 @@
+             return status;
+         }
+      } else {
++#ifdef __COSMOPOLITAN__
++        // Cosmopolitan does not expose waitid(P_PID, ..., WNOWAIT).
++        // Returning NOT_A_CHILD makes the Java layer fall back to its
++        // non-reaping liveness polling path.
++        return java_lang_ProcessHandleImpl_NOT_A_CHILD;
++#else
+         /*
+          * Wait for the child process to exit without reaping the exitValue.
+          * waitid() is standard on all POSIX platforms.
+@@ -253,6 +259,7 @@
+               */
+              return siginfo.si_status;
+         }
++#endif
+     }
+ }
+ 
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/TimeZone_md.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/TimeZone_md.c
+@@ -45,7 +45,7 @@
+ #define filegets        fgets
+ #define fileclose       fclose
+ 
+-#if defined(__linux__) || defined(_ALLBSD_SOURCE)
++#if defined(__linux__) || defined(__COSMOPOLITAN__) || defined(_ALLBSD_SOURCE)
+ static const char *ZONEINFO_DIR = "/usr/share/zoneinfo";
+ static const char *DEFAULT_ZONEINFO_FILE = "/etc/localtime";
+ #else
+@@ -56,7 +56,7 @@
+ 
+ static const char popularZones[][4] = {"UTC", "GMT"};
+ 
+-#if defined(__linux__) || defined(MACOSX)
++#if defined(__linux__) || defined(__COSMOPOLITAN__) || defined(MACOSX)
+ static char *isFileIdentical(char* buf, size_t size, char *pathname);
+ 
+ /*
+@@ -474,8 +474,8 @@
+         if (*tz == ':') {
+             tz++;
+         }
+-#if defined(__linux__)
+-        /* Ignore "posix/" prefix on Linux. */
++#if defined(__linux__) || defined(__COSMOPOLITAN__)
++        /* Ignore "posix/" prefix on Linux/Cosmopolitan. */
+         if (strncmp(tz, "posix/", 6) == 0) {
+             tz += 6;
+         }
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/io_util_md.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/io_util_md.c
+@@ -30,7 +30,7 @@
+ #include <string.h>
+ #include <unistd.h>
+ 
+-#if defined(__linux__) || defined(_ALLBSD_SOURCE) || defined(_AIX)
++#if defined(__linux__) || defined(__COSMOPOLITAN__) || defined(_ALLBSD_SOURCE) || defined(_AIX)
+ #include <sys/ioctl.h>
+ #endif
+ 
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/jni_util_md.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/jni_util_md.c
+@@ -31,7 +31,7 @@
+ #include "jni_util.h"
+ #include "dlfcn.h"
+ 
+-#if defined(LINUX) && (defined(_GNU_SOURCE) || \
++#if defined(LINUX) && !defined(__COSMOPOLITAN__) && (defined(_GNU_SOURCE) || \
+          (defined(_POSIX_C_SOURCE) && _POSIX_C_SOURCE < 200112L \
+              && defined(_XOPEN_SOURCE) && _XOPEN_SOURCE < 600))
+ extern int __xpg_strerror_r(int, char *, size_t);
+@@ -43,7 +43,11 @@
+     if (procHandle != NULL) {
+         return procHandle;
+     }
+-#ifdef __APPLE__
++#ifdef __COSMOPOLITAN__
++    // Non-null sentinel. HotSpot os::dll_lookup() resolves it against
++    // the symbol table embedded in the static APE executable.
++    procHandle = (void*)1;
++#elif defined(__APPLE__)
+     procHandle = (void*)dlopen(NULL, RTLD_FIRST);
+ #else
+     procHandle = (void*)dlopen(NULL, RTLD_LAZY);
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjli/java_md.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjli/java_md.c
+@@ -525,7 +525,14 @@
+     JLI_TraceLauncher("JVM path is %s\n", jvmpath);
+ 
+     if (JLI_IsStaticallyLinked()) {
++#ifdef __COSMOPOLITAN__
++        ifn->CreateJavaVM = (CreateJavaVM_t) JNI_CreateJavaVM;
++        ifn->GetDefaultJavaVMInitArgs = (GetDefaultJavaVMInitArgs_t) JNI_GetDefaultJavaVMInitArgs;
++        ifn->GetCreatedJavaVMs = (GetCreatedJavaVMs_t) JNI_GetCreatedJavaVMs;
++        return JNI_TRUE;
++#else
+         libjvm = dlopen(NULL, RTLD_NOW + RTLD_GLOBAL);
++#endif
+     } else {
+         libjvm = dlopen(jvmpath, RTLD_NOW + RTLD_GLOBAL);
+         if (libjvm == NULL) {
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjli/java_md_common.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjli/java_md_common.c
+@@ -24,6 +24,9 @@
+  */
+ #include <sys/time.h>
+ #include "java.h"
++#ifdef __COSMOPOLITAN__
++#include <cosmo.h>
++#endif
+ 
+ #define JAVA_DLL "libjava.so"
+ 
+@@ -99,6 +102,15 @@
+ jboolean
+ GetApplicationHomeFromDll(char *buf, jint bufsize)
+ {
++#ifdef __COSMOPOLITAN__
++    const char *execname = GetProgramExecutableName();
++    if (execname != NULL) {
++        char *path = realpath(execname, buf);
++        if (path == buf) {
++            return TruncatePath(buf, JNI_FALSE);
++        }
++    }
++#else
+     /* try to find ourselves instead */
+     Dl_info info;
+     if (dladdr((void*)&GetApplicationHomeFromDll, &info) != 0) {
+@@ -107,6 +119,7 @@
+             return TruncatePath(buf, JNI_TRUE);
+         }
+     }
++#endif
+     return JNI_FALSE;
+ }
+ 
+@@ -383,6 +396,9 @@
+ jclass
+ FindBootStrapClass(JNIEnv *env, const char* classname)
+ {
++#ifdef __COSMOPOLITAN__
++   return JVM_FindClassFromBootLoader(env, classname);
++#else
+    if (findBootClass == NULL) {
+        findBootClass = (FindClassFromBootLoader_t *)dlsym(RTLD_DEFAULT,
+           "JVM_FindClassFromBootLoader");
+@@ -393,6 +409,7 @@
+        }
+    }
+    return findBootClass(env, classname);
++#endif
+ }
+ 
+ JNIEXPORT StdArg JNICALL
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnet/Inet4AddressImpl.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnet/Inet4AddressImpl.c
+@@ -26,9 +26,11 @@
+ #include <errno.h>
+ #include <sys/types.h>
+ #include <netinet/in.h>
++#ifndef __COSMOPOLITAN__
+ #include <netinet/in_systm.h>
+ #include <netinet/ip.h>
+ #include <netinet/ip_icmp.h>
++#endif
+ #include <stdlib.h>
+ #include <string.h>
+ #include <sys/time.h>
+@@ -333,6 +335,7 @@
+     return JNI_FALSE;
+ }
+ 
++#ifndef __COSMOPOLITAN__
+ /**
+  * ping implementation.
+  * Send an ICMP_ECHO_REQUEST packet every second until either the timeout
+@@ -457,6 +460,8 @@
+     return JNI_FALSE;
+ }
+ 
++#endif /* !__COSMOPOLITAN__ */
++
+ /*
+  * Class:     java_net_Inet4AddressImpl
+  * Method:    isReachable0
+@@ -502,6 +507,9 @@
+         netif = &inf;
+     }
+ 
++#ifdef __COSMOPOLITAN__
++    return tcp_ping4(env, &sa, netif, timeout, ttl);
++#else
+     // Let's try to create a RAW socket to send ICMP packets.
+     // This usually requires "root" privileges, so it's likely to fail.
+     fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
+@@ -511,4 +519,5 @@
+         // It didn't fail, so we can use ICMP_ECHO requests.
+         return ping4(env, fd, &sa, netif, timeout, ttl);
+     }
++#endif
+ }
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnet/Inet6AddressImpl.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnet/Inet6AddressImpl.c
+@@ -29,7 +29,9 @@
+ #include <sys/time.h>
+ #include <sys/types.h>
+ #include <netinet/in.h>
++#ifndef __COSMOPOLITAN__
+ #include <netinet/icmp6.h>
++#endif
+ 
+ #if defined(_ALLBSD_SOURCE)
+ #include <ifaddrs.h>
+@@ -539,6 +541,7 @@
+  * expires or an answer is received.
+  * Returns true if an ECHO_REPLY is received, false otherwise.
+  */
++#ifndef __COSMOPOLITAN__
+ static jboolean
+ ping6(JNIEnv *env, jint fd, SOCKETADDRESS *sa, SOCKETADDRESS *netif,
+       jint timeout, jint ttl)
+@@ -658,6 +661,8 @@
+     return JNI_FALSE;
+ }
+ 
++#endif /* !__COSMOPOLITAN__ */
++
+ /*
+  * Class:     java_net_Inet6AddressImpl
+  * Method:    isReachable0
+@@ -709,6 +714,9 @@
+         netif = &inf;
+     }
+ 
++#ifdef __COSMOPOLITAN__
++    return tcp_ping6(env, &sa, netif, timeout, ttl);
++#else
+     // Let's try to create a RAW socket to send ICMP packets.
+     // This usually requires "root" privileges, so it's likely to fail.
+     fd = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+@@ -718,4 +726,5 @@
+         // It didn't fail, so we can use ICMP_ECHO requests.
+         return ping6(env, fd, &sa, netif, timeout, ttl);
+     }
++#endif
+ }
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnet/NetworkInterface.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnet/NetworkInterface.c
+@@ -24,6 +24,11 @@
+  */
+ #include <arpa/inet.h>
+ #include <errno.h>
++#ifdef __COSMOPOLITAN__
++#define _COSMO_SOURCE
++#include <libc/dce.h>
++#include <netinet/in.h>
++#endif
+ #include <net/if.h>
+ #include <net/if_arp.h>
+ #include <stdlib.h>
+@@ -47,7 +52,7 @@
+ 
+ #include "java_net_InetAddress.h"
+ 
+-#if defined(__linux__)
++#if defined(__linux__) || defined(__COSMOPOLITAN__)
+     #define _PATH_PROCNET_IFINET6 "/proc/net/if_inet6"
+ #endif
+ 
+@@ -1138,8 +1143,8 @@
+     return sock;
+ }
+ 
+-/** Linux **/
+-#if defined(__linux__)
++/** Linux / Cosmopolitan **/
++#if defined(__linux__) || defined(__COSMOPOLITAN__)
+ 
+ /*
+  * Opens a socket for further ioctl calls. Tries AF_INET socket first and
+@@ -1171,6 +1176,17 @@
+  * Enumerates and returns all IPv4 interfaces on Linux.
+  */
+ static netif *enumIPv4Interfaces(JNIEnv *env, int sock, netif *ifs) {
++#ifdef __COSMOPOLITAN__
++    // Cosmopolitan ioctl(SIOCGIFCONF) SIGSEGV on XNU (packed ifconf).
++    if (IsXnu()) {
++        struct sockaddr_in addr;
++        memset(&addr, 0, sizeof(addr));
++        addr.sin_family = AF_INET;
++        addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++        return addif(env, sock, "lo", ifs,
++                     (struct sockaddr *)&addr, NULL, AF_INET, 8);
++    }
++#endif
+     struct ifconf ifc;
+     struct ifreq *ifreqP;
+     char *buf = NULL;
+@@ -1315,6 +1331,9 @@
+   (JNIEnv *env, const char *ifname, const struct in_addr *addr,
+    unsigned char *buf)
+ {
++#ifdef __COSMOPOLITAN__
++    return -1;
++#else
+     struct ifreq ifr;
+     int i, sock;
+ 
+@@ -1341,9 +1360,13 @@
+     }
+ 
+     return -1;
++#endif
+ }
+ 
+ static int getMTU(JNIEnv *env, int sock, const char *ifname) {
++#ifdef __COSMOPOLITAN__
++    return -1;
++#else
+     struct ifreq if2;
+     memset((char *)&if2, 0, sizeof(if2));
+     strncpy(if2.ifr_name, ifname, sizeof(if2.ifr_name) - 1);
+@@ -1355,6 +1378,7 @@
+     }
+ 
+     return if2.ifr_mtu;
++#endif
+ }
+ 
+ static int getFlags(int sock, const char *ifname, int *flags) {
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/ch/NativeThread.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/ch/NativeThread.c
+@@ -34,7 +34,9 @@
+ #include <signal.h>
+ #include <pthread.h>
+ 
+-#ifdef __linux__
++#ifdef __COSMOPOLITAN__
++  #define INTERRUPT_SIGNAL SIGUSR1
++#elif defined(__linux__)
+   /* Also defined in net/linux_close.c */
+   #define INTERRUPT_SIGNAL (SIGRTMAX - 2)
+ #elif defined(_AIX)
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/ch/Net.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/ch/Net.c
+@@ -64,7 +64,7 @@
+ /**
+  * IPV6_ADD_MEMBERSHIP/IPV6_DROP_MEMBERSHIP may not be defined on OSX and AIX
+  */
+-#if defined(__APPLE__) || defined(_AIX)
++#if defined(__APPLE__) || defined(_AIX) || defined(__COSMOPOLITAN__)
+   #ifndef IPV6_ADD_MEMBERSHIP
+     #define IPV6_ADD_MEMBERSHIP     IPV6_JOIN_GROUP
+     #define IPV6_DROP_MEMBERSHIP    IPV6_LEAVE_GROUP
+@@ -78,6 +78,7 @@
+  * Copy IPv6 group, interface index, and IPv6 source address
+  * into group_source_req structure.
+  */
++#ifndef __COSMOPOLITAN__
+ static void initGroupSourceReq(JNIEnv* env, jbyteArray group, jint index,
+                                jbyteArray source, struct group_source_req *req)
+ {
+@@ -93,6 +94,7 @@
+     sin6->sin6_family = AF_INET6;
+     COPY_INET6_ADDRESS(env, source, (jbyte *)&(sin6->sin6_addr));
+ }
++#endif /* !__COSMOPOLITAN__ */
+ 
+ #ifdef _AIX
+ 
+@@ -642,7 +644,9 @@
+                                 jint group, jint interf, jint source)
+ {
+     struct ip_mreq mreq;
++#ifndef __COSMOPOLITAN__
+     struct ip_mreq_source mreq_source;
++#endif
+     int opt, n, optlen;
+     void* optval;
+ 
+@@ -653,6 +657,9 @@
+         optval = (void*)&mreq;
+         optlen = sizeof(mreq);
+     } else {
++#ifdef __COSMOPOLITAN__
++        return IOS_UNAVAILABLE;
++#else
+ 
+ #ifdef _AIX
+         /* check AIX for support of source filtering */
+@@ -667,6 +674,7 @@
+         opt = (join) ? IP_ADD_SOURCE_MEMBERSHIP : IP_DROP_SOURCE_MEMBERSHIP;
+         optval = (void*)&mreq_source;
+         optlen = sizeof(mreq_source);
++#endif
+     }
+ 
+     n = setsockopt(fdval(env,fdo), IPPROTO_IP, opt, optval, optlen);
+@@ -699,8 +707,8 @@
+ Java_sun_nio_ch_Net_blockOrUnblock4(JNIEnv *env, jobject this, jboolean block, jobject fdo,
+                                     jint group, jint interf, jint source)
+ {
+-#ifdef __APPLE__
+-    /* no IPv4 exclude-mode filtering for now */
++#if defined(__APPLE__) || defined(__COSMOPOLITAN__)
++    /* no IPv4 exclude-mode/source filtering for now */
+     return IOS_UNAVAILABLE;
+ #else
+     struct ip_mreq_source mreq_source;
+@@ -734,7 +742,9 @@
+                                 jbyteArray group, jint index, jbyteArray source)
+ {
+     struct ipv6_mreq mreq6;
++#ifndef __COSMOPOLITAN__
+     struct group_source_req req;
++#endif
+     int opt, n, optlen;
+     void* optval;
+ 
+@@ -745,8 +755,8 @@
+         optval = (void*)&mreq6;
+         optlen = sizeof(mreq6);
+     } else {
+-#ifdef __APPLE__
+-        /* no IPv6 include-mode filtering for now */
++#if defined(__APPLE__) || defined(__COSMOPOLITAN__)
++        /* no IPv6 include-mode/source filtering for now */
+         return IOS_UNAVAILABLE;
+ #else
+         initGroupSourceReq(env, group, index, source, &req);
+@@ -776,8 +786,8 @@
+ Java_sun_nio_ch_Net_blockOrUnblock6(JNIEnv *env, jobject this, jboolean block, jobject fdo,
+                                     jbyteArray group, jint index, jbyteArray source)
+ {
+-#ifdef __APPLE__
+-    /* no IPv6 exclude-mode filtering for now */
++#if defined(__APPLE__) || defined(__COSMOPOLITAN__)
++    /* no IPv6 exclude-mode/source filtering for now */
+     return IOS_UNAVAILABLE;
+ #else
+     struct group_source_req req;
+
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/globalDefinitions_aarch64.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/globalDefinitions_aarch64.hpp
+@@ -65,7 +65,7 @@
+ 
+ #define SUPPORT_RESERVED_STACK_AREA
+ 
+-#if defined(__APPLE__) || defined(_WIN64)
++#if defined(__APPLE__) || defined(_WIN64) || defined(__COSMOPOLITAN__)
+ #define R18_RESERVED
+ #define R18_RESERVED_ONLY(code) code
+ #define NOT_R18_RESERVED(code)
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/assembler_aarch64.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/assembler_aarch64.hpp
+@@ -139,7 +139,12 @@
+ 
+ constexpr Register lr            = r30; // link register
+ constexpr Register rfp           = r29; // frame pointer
++#ifdef __COSMOPOLITAN__
++// Cosmopolitan AArch64 reserves x18 and x28.  HotSpot rthread lives in x25.
++constexpr Register rthread       = r25; // current thread
++#else
+ constexpr Register rthread       = r28; // current thread
++#endif
+ constexpr Register rheapbase     = r27; // base of heap
+ constexpr Register rcpool        = r26; // constant pool cache
+ constexpr Register rlocals       = r24; // locals on stack
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/aarch64.ad
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/aarch64.ad
+@@ -114,8 +114,13 @@
+ reg_def R16_H   ( SOC, SOC, Op_RegI, 16, r16->as_VMReg()->next());
+ reg_def R17     ( SOC, SOC, Op_RegI, 17, r17->as_VMReg()        );
+ reg_def R17_H   ( SOC, SOC, Op_RegI, 17, r17->as_VMReg()->next());
++#ifdef R18_RESERVED
++reg_def R18     (  NS, SOC, Op_RegI, 18, r18_tls->as_VMReg()        ); // platform/Cosmopolitan TLS
++reg_def R18_H   (  NS, SOC, Op_RegI, 18, r18_tls->as_VMReg()->next());
++#else
+ reg_def R18     ( SOC, SOC, Op_RegI, 18, r18_tls->as_VMReg()        );
+ reg_def R18_H   ( SOC, SOC, Op_RegI, 18, r18_tls->as_VMReg()->next());
++#endif
+ reg_def R19     ( SOC, SOE, Op_RegI, 19, r19->as_VMReg()        );
+ reg_def R19_H   ( SOC, SOE, Op_RegI, 19, r19->as_VMReg()->next());
+ reg_def R20     ( SOC, SOE, Op_RegI, 20, r20->as_VMReg()        ); // caller esp
+@@ -128,14 +133,24 @@
+ reg_def R23_H   ( SOC, SOE, Op_RegI, 23, r23->as_VMReg()->next());
+ reg_def R24     ( SOC, SOE, Op_RegI, 24, r24->as_VMReg()        );
+ reg_def R24_H   ( SOC, SOE, Op_RegI, 24, r24->as_VMReg()->next());
++#ifdef __COSMOPOLITAN__
++reg_def R25     (  NS, SOE, Op_RegI, 25, r25->as_VMReg()        ); // thread
++reg_def R25_H   (  NS, SOE, Op_RegI, 25, r25->as_VMReg()->next());
++#else
+ reg_def R25     ( SOC, SOE, Op_RegI, 25, r25->as_VMReg()        );
+ reg_def R25_H   ( SOC, SOE, Op_RegI, 25, r25->as_VMReg()->next());
++#endif
+ reg_def R26     ( SOC, SOE, Op_RegI, 26, r26->as_VMReg()        );
+ reg_def R26_H   ( SOC, SOE, Op_RegI, 26, r26->as_VMReg()->next());
+ reg_def R27     ( SOC, SOE, Op_RegI, 27, r27->as_VMReg()        ); // heapbase
+ reg_def R27_H   ( SOC, SOE, Op_RegI, 27, r27->as_VMReg()->next());
++#ifdef __COSMOPOLITAN__
++reg_def R28     (  NS, SOE, Op_RegI, 28, r28->as_VMReg()        ); // Cosmopolitan TLS
++reg_def R28_H   (  NS, SOE, Op_RegI, 28, r28->as_VMReg()->next());
++#else
+ reg_def R28     (  NS, SOE, Op_RegI, 28, r28->as_VMReg()        ); // thread
+ reg_def R28_H   (  NS, SOE, Op_RegI, 28, r28->as_VMReg()->next());
++#endif
+ reg_def R29     (  NS,  NS, Op_RegI, 29, r29->as_VMReg()        ); // fp
+ reg_def R29_H   (  NS,  NS, Op_RegI, 29, r29->as_VMReg()->next());
+ reg_def R30     (  NS,  NS, Op_RegI, 30, r30->as_VMReg()        ); // lr
+@@ -404,13 +419,20 @@
+     R22, R22_H,
+     R23, R23_H,
+     R24, R24_H,
++#ifndef __COSMOPOLITAN__
+     R25, R25_H,
++#endif
+     R26, R26_H,
+ 
+     // non-allocatable registers
+ 
+     R27, R27_H, // heapbase
++#ifdef __COSMOPOLITAN__
++    R25, R25_H, // thread
++    R28, R28_H, // Cosmopolitan TLS
++#else
+     R28, R28_H, // thread
++#endif
+     R29, R29_H, // fp
+     R30, R30_H, // lr
+     R31, R31_H, // sp
+@@ -591,9 +613,14 @@
+ reg_class non_allocatable_reg32(
+ #ifdef R18_RESERVED
+     // See comment in register_aarch64.hpp
+-    R18,                        // tls on Windows
++    R18,                        // tls on Windows / Cosmopolitan
+ #endif
++#ifdef __COSMOPOLITAN__
++    R25,                        // thread
++    R28,                        // Cosmopolitan TLS
++#else
+     R28,                        // thread
++#endif
+     R30,                        // lr
+     R31                         // sp
+ );
+@@ -604,7 +631,12 @@
+     // See comment in register_aarch64.hpp
+     R18, R18_H,                 // tls on Windows, platform register on macOS
+ #endif
++#ifdef __COSMOPOLITAN__
++    R25, R25_H,                 // thread
++    R28, R28_H,                 // Cosmopolitan TLS
++#else
+     R28, R28_H,                 // thread
++#endif
+     R30, R30_H,                 // lr
+     R31, R31_H                  // sp
+ );
+@@ -666,7 +698,11 @@
+ 
+ // Class for thread register
+ reg_class thread_reg(
++#ifdef __COSMOPOLITAN__
++    R25, R25_H
++#else
+     R28, R28_H
++#endif
+ );
+ 
+ // Class for frame pointer register
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/c1_FrameMap_aarch64.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/c1_FrameMap_aarch64.cpp
+@@ -190,7 +190,9 @@
+   map_register(i, r22); r22_opr = LIR_OprFact::single_cpu(i); i++;
+   map_register(i, r23); r23_opr = LIR_OprFact::single_cpu(i); i++;
+   map_register(i, r24); r24_opr = LIR_OprFact::single_cpu(i); i++;
++#ifndef __COSMOPOLITAN__
+   map_register(i, r25); r25_opr = LIR_OprFact::single_cpu(i); i++;
++#endif
+   map_register(i, r26); r26_opr = LIR_OprFact::single_cpu(i); i++;
+ 
+   // r27 is allocated conditionally. With compressed oops it holds
+@@ -209,7 +211,12 @@
+   if (preserve_rheapbase) {
+     map_register(i, r27); r27_opr = LIR_OprFact::single_cpu(i); i++; // rheapbase
+   }
++#ifdef __COSMOPOLITAN__
++  map_register(i, r25); r25_opr = LIR_OprFact::single_cpu(i); i++; // rthread
++  map_register(i, r28); r28_opr = LIR_OprFact::single_cpu(i); i++; // Cosmopolitan TLS
++#else
+   map_register(i, r28); r28_opr = LIR_OprFact::single_cpu(i); i++; // rthread
++#endif
+   if(PreserveFramePointer) {
+     map_register(i, r29); r29_opr = LIR_OprFact::single_cpu(i); i++; // rfp
+   }
+@@ -262,12 +269,20 @@
+   _caller_save_cpu_regs[20 R18_RESERVED_ONLY(-1)] = r22_opr;
+   _caller_save_cpu_regs[21 R18_RESERVED_ONLY(-1)] = r23_opr;
+   _caller_save_cpu_regs[22 R18_RESERVED_ONLY(-1)] = r24_opr;
++#ifdef __COSMOPOLITAN__
++  _caller_save_cpu_regs[23 R18_RESERVED_ONLY(-1)] = r26_opr;
++
++  if (nof_caller_save_cpu_regs() > 24 R18_RESERVED_ONLY(-1)) {
++    _caller_save_cpu_regs[24 R18_RESERVED_ONLY(-1)] = r27_opr;
++  }
++#else
+   _caller_save_cpu_regs[23 R18_RESERVED_ONLY(-1)] = r25_opr;
+   _caller_save_cpu_regs[24 R18_RESERVED_ONLY(-1)] = r26_opr;
+ 
+   if (nof_caller_save_cpu_regs() > 25 R18_RESERVED_ONLY(-1)) {
+     _caller_save_cpu_regs[25 R18_RESERVED_ONLY(-1)] = r27_opr;
+   }
++#endif
+ 
+   for (int i = 0; i < 8; i++) {
+     _caller_save_fpu_regs[i] = LIR_OprFact::single_fpu(i);
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/c1_FrameMap_aarch64.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/c1_FrameMap_aarch64.hpp
+@@ -154,9 +154,14 @@
+     }
+ 
+     // rscratch registers r8, r9
+-    // r28=rthread, r30=lr, r31=sp
+-    // r18 on masOS/Windows
++    // rthread (r28, or r25 on Cosmopolitan), r30=lr, r31=sp
++    // r18 on macOS/Windows/Cosmopolitan
++    // Cosmopolitan also keeps r28 for its TLS/runtime ABI
++#ifdef __COSMOPOLITAN__
++    return range - 6 R18_RESERVED_ONLY(-1);
++#else
+     return range - 5 R18_RESERVED_ONLY(-1);
++#endif
+   }
+ 
+   static int nof_caller_save_cpu_regs() { return adjust_reg_range(pd_nof_caller_save_cpu_regs_frame_map);  }
+--- jdk25u-jdk-25.0.4-ga/make/hotspot/gensrc/GensrcAdlc.gmk
++++ jdk25u-jdk-25.0.4-ga/make/hotspot/gensrc/GensrcAdlc.gmk
+@@ -113,6 +113,13 @@
+     endif
+   endif
+ 
++  # Cosmopolitan AArch64: reserve x18/x28 and move HotSpot rthread to x25.
++  ifeq ($(HOTSPOT_TARGET_CPU_ARCH), aarch64)
++    ifneq ($(findstring cosmo,$(CXX)),)
++      ADLCFLAGS += -DR18_RESERVED -D__COSMOPOLITAN__
++    endif
++  endif
++
+   ifeq ($(call isTargetOs, windows), false)
+     # NOTE: Windows adlc flags was different in the old build. Is this really
+     # correct?
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/vm_version_linux_aarch64.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/vm_version_linux_aarch64.cpp
+@@ -27,8 +27,14 @@
+ #include "runtime/os.inline.hpp"
+ #include "runtime/vm_version.hpp"
+ 
++#ifdef __COSMOPOLITAN__
++#define _COSMO_SOURCE
++#include <libc/dce.h>
++#include <sys/auxv.h>
++#else
+ #include <asm/hwcap.h>
+ #include <sys/auxv.h>
++#endif
+ #include <sys/prctl.h>
+ 
+ #ifndef HWCAP_AES
+@@ -109,6 +114,25 @@
+ }
+ 
+ void VM_Version::get_os_cpu_info() {
++#ifdef __COSMOPOLITAN__
++  // Apple Silicon traps MRS CTR_EL0 (SIGILL / ILL_ILLTRP).  Linux AT_HWCAP
++  // is also empty on XNU.  Follow the macOS HotSpot baseline: FP/ASIMD/AES
++  // plus M1-class LSE/CRC/SHA3/SHA512, and read DCZID_EL0 only.
++  if (IsXnu()) {
++    _features = CPU_FP | CPU_ASIMD |
++                CPU_AES | CPU_PMULL | CPU_SHA1 | CPU_SHA2 |
++                CPU_CRC32 | CPU_LSE | CPU_SHA512 | CPU_SHA3;
++    _icache_line_size = 16;
++    _dcache_line_size = 128;
++    uint64_t dczid_el0;
++    __asm__ volatile ("mrs %0, DCZID_EL0" : "=r"(dczid_el0));
++    if (!(dczid_el0 & 0x10)) {
++      _zva_length = 4 << (dczid_el0 & 0xf);
++    }
++    _cpu = CPU_APPLE;
++    return;
++  }
++#endif
+ 
+   uint64_t auxv = getauxval(AT_HWCAP);
+   uint64_t auxv2 = getauxval(AT_HWCAP2);
+
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
+@@ -4616,7 +4616,14 @@
+ // Instead of crashing "lazily" when trying to make a page executable,
+ // this code probes for the presence of PaX and reports the failure
+ // eagerly.
+ static void check_pax(void) {
++#ifdef __COSMOPOLITAN__
++  // Linux HotSpot's PaX probe is invalid on Apple Silicon.
++  // macOS/AArch64 JIT memory requires MAP_JIT/W^X semantics.
++  if (IsXnu()) {
++    return;
++  }
++#endif
+   // Zero doesn't generate code dynamically, so no need to perform the PaX check
+ #ifndef ZERO
+   size_t size = os::vm_page_size();
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/utilities/macros.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/utilities/macros.hpp
+@@ -555,7 +555,13 @@
+ #define AARCH64_PORT_ONLY(code)
+ #endif
+ 
++#if defined(__COSMOPOLITAN__) && defined(AARCH64)
++// Cosmopolitan fat binaries keep the Linux HotSpot OS layer.  Apple Silicon
++// still needs the macOS AArch64 W^X call sites, gated at runtime.
++#define MACOS_AARCH64_ONLY(x) x
++#else
+ #define MACOS_AARCH64_ONLY(x) MACOS_ONLY(AARCH64_ONLY(x))
++#endif
+ 
+ #if defined(RISCV32) || defined(RISCV64)
+ #define RISCV
+
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/os.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/os.hpp
+@@ -1077,10 +1077,10 @@
+   static char*  build_agent_function_name(const char *sym, const char *cname,
+                                           bool is_absolute_path);
+ 
+-#if defined(__APPLE__) && defined(AARCH64)
++#if defined(AARCH64) && (defined(__APPLE__) || defined(__COSMOPOLITAN__))
+   // Enables write or execute access to writeable and executable pages.
+   static void current_thread_enable_wx(WXMode mode);
+-#endif // __APPLE__ && AARCH64
++#endif // AARCH64 && (__APPLE__ || __COSMOPOLITAN__)
+ 
+  protected:
+   static volatile unsigned int _rand_seed;    // seed for random number generator
+
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.hpp
+@@ -610,7 +610,7 @@
+   static void SpinAcquire(volatile int * Lock);
+   static void SpinRelease(volatile int * Lock);
+ 
+-#if defined(__APPLE__) && defined(AARCH64)
++#if defined(AARCH64) && (defined(__APPLE__) || defined(__COSMOPOLITAN__))
+  private:
+   DEBUG_ONLY(bool _wx_init);
+   WXMode _wx_state;
+@@ -621,7 +621,7 @@
+   void assert_wx_state(WXMode expected) {
+     assert(_wx_state == expected, "wrong state");
+   }
+-#endif // __APPLE__ && AARCH64
++#endif // AARCH64 && (__APPLE__ || __COSMOPOLITAN__)
+ 
+  private:
+   bool _in_asgct = false;
+
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.inline.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.inline.hpp
+@@ -70,25 +70,38 @@
+   Atomic::release_store_fence(&_threads_hazard_ptr, new_list);
+ }
+ 
+-#if defined(__APPLE__) && defined(AARCH64)
++#if defined(AARCH64) && (defined(__APPLE__) || defined(__COSMOPOLITAN__))
+ inline void Thread::init_wx() {
+   assert(this == Thread::current(), "should only be called for current thread");
+   assert(!_wx_init, "second init");
+   _wx_state = WXWrite;
+   os::current_thread_enable_wx(_wx_state);
+   DEBUG_ONLY(_wx_init = true);
++#ifdef __COSMOPOLITAN__
++  // Java threads rest in WXExec (C2/nmethods).  GC/VM threads stay WXWrite
++  // so ELF __atomic can CAS nmethod oops (G1NMethodClosure).
++  if (is_Java_thread()) {
++    enable_wx(WXExec);
++  }
++#endif
+ }
+ 
+ inline WXMode Thread::enable_wx(WXMode new_state) {
+   assert(this == Thread::current(), "should only be called for current thread");
+   assert(_wx_init, "should be inited");
+   WXMode old = _wx_state;
++#ifdef __COSMOPOLITAN__
++  // libc icache flush can change APRR without updating _wx_state.
++  _wx_state = new_state;
++  os::current_thread_enable_wx(new_state);
++#else
+   if (_wx_state != new_state) {
+     _wx_state = new_state;
+     os::current_thread_enable_wx(new_state);
+   }
++#endif
+   return old;
+ }
+-#endif // __APPLE__ && AARCH64
++#endif // AARCH64 && (__APPLE__ || __COSMOPOLITAN__)
+ 
+ #endif // SHARE_RUNTIME_THREAD_INLINE_HPP
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/threadWXSetters.inline.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/threadWXSetters.inline.hpp
+@@ -28,7 +28,7 @@
+ 
+ // No threadWXSetters.hpp
+ 
+-#if defined(__APPLE__) && defined(AARCH64)
++#if defined(AARCH64) && (defined(__APPLE__) || defined(__COSMOPOLITAN__))
+ 
+ #include "runtime/thread.inline.hpp"
+ 
+@@ -46,7 +46,7 @@
+     }
+   }
+ };
+-#endif // __APPLE__ && AARCH64
++#endif // AARCH64 && (__APPLE__ || __COSMOPOLITAN__)
+ 
+ #endif // SHARE_RUNTIME_THREADWXSETTERS_INLINE_HPP
+ 
+
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/os_linux_aarch64.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/os_linux_aarch64.cpp
+@@ -46,11 +46,16 @@
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/stubRoutines.hpp"
+ #include "runtime/javaThread.hpp"
++#include "runtime/threadWXSetters.inline.hpp"
+ #include "runtime/timer.hpp"
+ #include "signals_posix.hpp"
+ #include "utilities/debug.hpp"
+ #include "utilities/events.hpp"
+ #include "utilities/vmError.hpp"
++#ifdef __COSMOPOLITAN__
++#define _COSMO_SOURCE
++#include <libc/dce.h>
++#endif
+ 
+ // put OS-includes here
+ # include <sys/types.h>
+@@ -192,6 +197,38 @@
+ 
+ bool PosixSignals::pd_hotspot_signal_handler(int sig, siginfo_t* info,
+                                              ucontext_t* uc, JavaThread* thread) {
++#ifdef __COSMOPOLITAN__
++  // Apple Silicon MAP_JIT: the handler may patch generated code (WXWrite),
++  // but resuming into a CodeCache stub must restore WXExec.  ThreadWXEnable
++  // would undo that restore on the way out.
++  struct WxGuard {
++    JavaThread* _t;
++    WXMode _saved;
++    bool _resume_exec;
++    WxGuard(JavaThread* t) : _t(t), _saved(WXWrite), _resume_exec(false) {
++      if (_t != nullptr) {
++        _saved = _t->enable_wx(WXWrite);
++      }
++      // enable_wx() may skip the APRR syscall when _wx_state already
++      // says WXWrite.  Cosmopolitan icache/libc can still leave the
++      // thread in execute mode; force write permission for the handler.
++      os::current_thread_enable_wx(WXWrite);
++    }
++    ~WxGuard() {
++      if (_t != nullptr) {
++        _t->enable_wx(_resume_exec ? WXExec : _saved);
++      } else if (!_resume_exec) {
++        os::current_thread_enable_wx(WXWrite);
++      }
++    }
++    void resume_exec() { _resume_exec = true; }
++    void stay_write() {
++      _resume_exec = false;
++      _saved = WXWrite;
++      os::current_thread_enable_wx(WXWrite);
++    }
++  } wx(thread);
++#endif
+ 
+ /*
+   NOTE: does not seem to work on linux.
+@@ -219,7 +256,8 @@
+     }
+ 
+     // Handle ALL stack overflow variations here
+-    if (sig == SIGSEGV) {
++    // XNU delivers stack overflow, poll, and implicit null as SIGBUS.
++    if (sig == SIGSEGV || sig == SIGBUS) {
+       // check if fault address is within thread stack
+       if (thread->is_in_full_stack(addr)) {
+         if (os::Posix::handle_stack_overflow(thread, addr, pc, uc, &stub)) {
+@@ -228,7 +266,43 @@
+       }
+     }
+ 
+-    if (thread->thread_state() == _thread_in_Java) {
++#ifdef __COSMOPOLITAN__
++    if (IsXnu() && sig == SIGBUS && pc != nullptr && addr != nullptr) {
++      const bool pc_in_cache = CodeCache::contains(pc);
++      const bool addr_in_cache = CodeCache::contains(addr);
++      if (addr_in_cache || pc_in_cache) {
++        // Retrying the same MAP_JIT fault forever is the Mac hang
++        // (sigprocmask UNBLOCK loop, empty stdout).  Give up to hs_err.
++        static thread_local int mapjit_sigbus_retries = 0;
++        static thread_local address mapjit_last_pc = nullptr;
++        if (pc == mapjit_last_pc) {
++          if (++mapjit_sigbus_retries > 8) {
++            mapjit_sigbus_retries = 0;
++            mapjit_last_pc = nullptr;
++            return false;
++          }
++        } else {
++          mapjit_sigbus_retries = 1;
++          mapjit_last_pc = pc;
++        }
++        if (addr_in_cache && !pc_in_cache) {
++          // C++ store into MAP_JIT.  Keep WXWrite across WxGuard dtor;
++          // restoring a prior WXExec retries the store in execute mode.
++          wx.stay_write();
++          return true;
++        }
++        if (pc_in_cache) {
++          wx.resume_exec();
++          return true;
++        }
++      }
++    }
++#endif
++
++    // We test if stub is already set (by the stack overflow code
++    // above) so it is not overwritten by the code that follows. This
++    // matches bsd_aarch64, which has to handle both SIGSEGV and SIGBUS.
++    if (thread->thread_state() == _thread_in_Java && stub == nullptr) {
+       // Java thread running in Java code => find exception handler if any
+       // a fault inside compiled code, the interpreter, or a stub
+ 
+@@ -239,9 +313,11 @@
+           tty->print_cr("trap: not_entrant (%s)", (sig == SIGTRAP) ? "SIGTRAP" : "SIGILL");
+         }
+         stub = SharedRuntime::get_handle_wrong_method_stub();
+-      } else if (sig == SIGSEGV && SafepointMechanism::is_poll_address((address)info->si_addr)) {
++      } else if ((sig == SIGSEGV || sig == SIGBUS) &&
++                 SafepointMechanism::is_poll_address((address)info->si_addr)) {
+         stub = SharedRuntime::get_poll_stub(pc);
+-      } else if (sig == SIGBUS /* && info->si_code == BUS_OBJERR */) {
++      } else if (sig == SIGBUS &&
++                 !MacroAssembler::uses_implicit_null_check((void*)addr)) {
+         // BugId 4454115: A read from a MappedByteBuffer can fault
+         // here if the underlying file has been truncated.
+         // Do not crash the VM in such a case.
+@@ -280,7 +356,7 @@
+                                               pc,
+                                               SharedRuntime::
+                                               IMPLICIT_DIVIDE_BY_ZERO);
+-      } else if (sig == SIGSEGV &&
++      } else if ((sig == SIGSEGV || sig == SIGBUS) &&
+                  MacroAssembler::uses_implicit_null_check((void*)addr)) {
+           // Determination of interpreter/vtable stub/compiled code null exception
+           stub = SharedRuntime::continuation_for_implicit_exception(thread, pc, SharedRuntime::IMPLICIT_NULL);
+@@ -311,6 +387,9 @@
+     if (thread != nullptr) thread->set_saved_exception_pc(pc);
+ 
+     os::Posix::ucontext_set_pc(uc, stub);
++#ifdef __COSMOPOLITAN__
++    wx.resume_exec();
++#endif
+     return true;
+   }
+ 
+@@ -396,10 +475,16 @@
+ 
+ extern "C" {
+   int SpinPause() {
++#ifdef __COSMOPOLITAN__
++    // StubRoutines::spin_wait lives in MAP_JIT.  VM/GC threads run WXWrite
++    // so executing that stub SIGBUS (GlobalCounter::write_synchronize).
++    __asm__ volatile("yield" ::: "memory");
++#else
+     using spin_wait_func_ptr_t = void (*)();
+     spin_wait_func_ptr_t func = CAST_TO_FN_PTR(spin_wait_func_ptr_t, StubRoutines::aarch64::spin_wait());
+     assert(func != nullptr, "StubRoutines::aarch64::spin_wait must not be null.");
+     (*func)();
++#endif
+     // If StubRoutines::aarch64::spin_wait consists of only a RET,
+     // SpinPause can be considered as implemented. There will be a sequence
+     // of instructions for:
+@@ -477,3 +562,18 @@
+     memmove(to, from, count * 8);
+   }
+ };
++
++#ifdef __COSMOPOLITAN__
++extern "C" {
++void __jit_begin(void);
++void __jit_end(void);
++}
++
++void os::current_thread_enable_wx(WXMode mode) {
++  if (mode == WXWrite) {
++    __jit_begin();
++  } else {
++    __jit_end();
++  }
++}
++#endif
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
+@@ -3775,7 +3775,7 @@
+ // 'requested_addr' is only treated as a hint, the return value may or
+ // may not start from the requested address. Unlike Linux mmap(), this
+ // function returns null to indicate failure.
+-static char* anon_mmap(char* requested_addr, size_t bytes) {
++static char* anon_mmap(char* requested_addr, size_t bytes, bool exec = false) {
+   // If a requested address was given:
+   //
+   // The POSIX-conforming way is to *omit* MAP_FIXED. This will leave existing mappings intact.
+@@ -3792,7 +3792,12 @@
+   // Backward compatibility: Older kernels will ignore the unknown flag; so mmap will behave
+   // as in mode (a).
+-  const int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS |
++  int flags = MAP_PRIVATE | MAP_NORESERVE | MAP_ANONYMOUS |
+                     ((requested_addr != nullptr) ? MAP_FIXED_NOREPLACE : 0);
++#ifdef __COSMOPOLITAN__
++  if (exec && IsXnu()) {
++    flags |= MAP_JIT;
++  }
++#endif
+ 
+   // Map reserved/uncommitted pages PROT_NONE so we fail early if we
+   // touch an uncommitted page. Otherwise, the read/write might
+@@ -4439,6 +4444,6 @@
+   // Linux mmap allows caller to pass an address as hint; give it a try first,
+   // if kernel honors the hint then we can return immediately.
+-  char * addr = anon_mmap(requested_addr, bytes);
++  char * addr = anon_mmap(requested_addr, bytes, exec);
+   if (addr == requested_addr) {
+     return requested_addr;
+   }
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/icache_linux_aarch64.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/icache_linux_aarch64.hpp
+@@ -30,14 +30,28 @@
+ // modifies code, part of the processor instruction cache potentially
+ // has to be flushed.
+ 
++#ifdef __COSMOPOLITAN__
++extern "C" void __clear_cache(void *, void *);
++#endif
++
+ class ICache : public AbstractICache {
+  public:
+   static void initialize(int phase);
+   static void invalidate_word(address addr) {
++#ifdef __COSMOPOLITAN__
++    // Cosmopolitan's __clear_cache uses sys_icache_invalidate on XNU.
++    __clear_cache((char *)addr, (char *)(addr + 4));
++#else
+     __builtin___clear_cache((char *)addr, (char *)(addr + 4));
++#endif
+   }
+   static void invalidate_range(address start, int nbytes) {
++    if (nbytes <= 0) return;
++#ifdef __COSMOPOLITAN__
++    __clear_cache((char *)start, (char *)(start + nbytes));
++#else
+     __builtin___clear_cache((char *)start, (char *)(start + nbytes));
++#endif
+   }
+ };
+ 
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/atomic_linux_aarch64.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os_cpu/linux_aarch64/atomic_linux_aarch64.hpp
+@@ -26,6 +26,107 @@
+ #ifndef OS_CPU_LINUX_AARCH64_ATOMIC_LINUX_AARCH64_HPP
+ #define OS_CPU_LINUX_AARCH64_ATOMIC_LINUX_AARCH64_HPP
+ 
++#ifdef __COSMOPOLITAN__
++// Linux aarch64 C++ atomics `blr` into StubRoutines in MAP_JIT CodeCache.
++// Apple Silicon APRR is W XOR X for the whole MAP_JIT region, so a stub
++// cannot CAS an nmethod header (needs W) while executing from CodeCache
++// (needs X).  hs_err: pc=atomic_entry_points, si_addr=nmethod.
++// Use compiler builtins in ELF text, matching bsd_aarch64.
++#include "utilities/debug.hpp"
++
++template<size_t byte_size>
++struct Atomic::PlatformAdd {
++  template<typename D, typename I>
++  D add_then_fetch(D volatile* dest, I add_value, atomic_memory_order order) const {
++    if (order == memory_order_relaxed) {
++      return __atomic_add_fetch(dest, add_value, __ATOMIC_RELAXED);
++    } else {
++      D res = __atomic_add_fetch(dest, add_value, __ATOMIC_RELEASE);
++      FULL_MEM_BARRIER;
++      return res;
++    }
++  }
++
++  template<typename D, typename I>
++  D fetch_then_add(D volatile* dest, I add_value, atomic_memory_order order) const {
++    return add_then_fetch(dest, add_value, order) - add_value;
++  }
++};
++
++template<size_t byte_size>
++template<typename T>
++inline T Atomic::PlatformXchg<byte_size>::operator()(T volatile* dest,
++                                                     T exchange_value,
++                                                     atomic_memory_order order) const {
++  STATIC_ASSERT(byte_size == sizeof(T));
++  T res = __atomic_exchange_n(dest, exchange_value, __ATOMIC_RELEASE);
++  FULL_MEM_BARRIER;
++  return res;
++}
++
++template<size_t byte_size>
++template<typename T>
++inline T Atomic::PlatformCmpxchg<byte_size>::operator()(T volatile* dest,
++                                                        T compare_value,
++                                                        T exchange_value,
++                                                        atomic_memory_order order) const {
++  STATIC_ASSERT(byte_size == sizeof(T));
++  if (order == memory_order_conservative) {
++    T value = compare_value;
++    FULL_MEM_BARRIER;
++    __atomic_compare_exchange(dest, &value, &exchange_value, /*weak*/false,
++                              __ATOMIC_RELAXED, __ATOMIC_RELAXED);
++    FULL_MEM_BARRIER;
++    return value;
++  } else {
++    STATIC_ASSERT (
++       memory_order_relaxed == __ATOMIC_RELAXED &&
++       memory_order_acquire == __ATOMIC_ACQUIRE &&
++       memory_order_release == __ATOMIC_RELEASE &&
++       memory_order_acq_rel == __ATOMIC_ACQ_REL &&
++       memory_order_seq_cst == __ATOMIC_SEQ_CST);
++
++    int failure_memory_order;
++    switch (order) {
++    case memory_order_release:
++      failure_memory_order = memory_order_relaxed; break;
++    case memory_order_acq_rel:
++      failure_memory_order = memory_order_acquire; break;
++    default:
++      failure_memory_order = order;
++    }
++    assert(failure_memory_order <= order, "must be");
++
++    T value = compare_value;
++    __atomic_compare_exchange(dest, &value, &exchange_value, /*weak*/false,
++                              order, failure_memory_order);
++    return value;
++  }
++}
++
++template<size_t byte_size>
++struct Atomic::PlatformOrderedLoad<byte_size, X_ACQUIRE>
++{
++  template <typename T>
++  T operator()(const volatile T* p) const { T data; __atomic_load(const_cast<T*>(p), &data, __ATOMIC_ACQUIRE); return data; }
++};
++
++template<size_t byte_size>
++struct Atomic::PlatformOrderedStore<byte_size, RELEASE_X>
++{
++  template <typename T>
++  void operator()(volatile T* p, T v) const { __atomic_store(const_cast<T*>(p), &v, __ATOMIC_RELEASE); }
++};
++
++template<size_t byte_size>
++struct Atomic::PlatformOrderedStore<byte_size, RELEASE_X_FENCE>
++{
++  template <typename T>
++  void operator()(volatile T* p, T v) const { release_store(p, v); OrderAccess::fence(); }
++};
++
++#else // !__COSMOPOLITAN__
++
+ #include "atomic_aarch64.hpp"
+ #include "runtime/vm_version.hpp"
+ 
+@@ -217,4 +318,6 @@
+   void operator()(volatile T* p, T v) const { release_store(p, v); OrderAccess::fence(); }
+ };
+ 
++#endif // __COSMOPOLITAN__
++
+ #endif // OS_CPU_LINUX_AARCH64_ATOMIC_LINUX_AARCH64_HPP
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/ProcessImpl_md.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libjava/ProcessImpl_md.c
+@@ -26,6 +26,11 @@
+ #undef  _LARGEFILE64_SOURCE
+ #define _LARGEFILE64_SOURCE 1
+ 
++#ifdef __COSMOPOLITAN__
++#define _COSMO_SOURCE
++#include <libc/dce.h>
++#endif
++
+ #include "jni.h"
+ #include "jvm.h"
+ #include "jvm_md.h"
+@@ -716,6 +721,10 @@
+     childenv[0] = childenv[1] = -1;
+     // Reset errno to protect against bogus error messages
+     errno = 0;
++#ifdef __COSMOPOLITAN__
++    // No /zip/lib/jspawnhelper.  posix_spawn on XNU returns errno 0.
++    mode = MODE_FORK;
++#endif
+ 
+     if ((c = NEW(ChildStuff, 1)) == NULL) return -1;
+     c->argv = NULL;
+--- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
+@@ -28,6 +28,10 @@
+ #include <string.h>
+ #include <limits.h>
+ #include <fcntl.h>
++#ifdef __COSMOPOLITAN__
++#define _COSMO_SOURCE
++#include <libc/dce.h>
++#endif
+ #include <dirent.h>
+ #include <unistd.h>
+ #include <errno.h>
+@@ -497,7 +501,65 @@
+         throwUnixException(env, EOVERFLOW);
+ 
+     return (jint)res;
++}
++
++#ifdef __COSMOPOLITAN__
++#define LINUX_O_ACCMODE 3
++#define LINUX_O_CREAT 64
++#define LINUX_O_EXCL 128
++#define LINUX_O_TRUNC 512
++#define LINUX_O_APPEND 1024
++#define LINUX_O_NONBLOCK 2048
++#define LINUX_O_DIRECTORY 65536
++#define LINUX_O_NOFOLLOW 131072
++#define LINUX_O_CLOEXEC 524288
++#define LINUX_O_SYNC 1052672
++#define LINUX_AT_FDCWD (-100)
++#define LINUX_AT_SYMLINK_NOFOLLOW 256
++#define LINUX_AT_REMOVEDIR 512
++
++static int cosmo_oflags(int f) {
++    if (!IsXnu()) return f;
++    int o = f & LINUX_O_ACCMODE;
++    if (f & LINUX_O_CREAT) o |= O_CREAT;
++    if (f & LINUX_O_EXCL) o |= O_EXCL;
++    if (f & LINUX_O_TRUNC) o |= O_TRUNC;
++    if (f & LINUX_O_APPEND) o |= O_APPEND;
++#ifdef O_NONBLOCK
++    if (f & LINUX_O_NONBLOCK) o |= O_NONBLOCK;
++#endif
++#ifdef O_DIRECTORY
++    if (f & LINUX_O_DIRECTORY) o |= O_DIRECTORY;
++#endif
++#ifdef O_NOFOLLOW
++    if (f & LINUX_O_NOFOLLOW) o |= O_NOFOLLOW;
++#endif
++#ifdef O_CLOEXEC
++    if (f & LINUX_O_CLOEXEC) o |= O_CLOEXEC;
++#endif
++#ifdef O_SYNC
++    if (f & LINUX_O_SYNC) o |= O_SYNC;
++#endif
++    return o;
++}
++static int cosmo_atfd(int dfd) {
++    if (IsXnu() && dfd == LINUX_AT_FDCWD) return AT_FDCWD;
++    return dfd;
++}
++static int cosmo_atflags(int f) {
++    if (!IsXnu()) return f;
++    int o = 0;
++    if (f & LINUX_AT_SYMLINK_NOFOLLOW) o |= AT_SYMLINK_NOFOLLOW;
++#ifdef AT_REMOVEDIR
++    if (f & LINUX_AT_REMOVEDIR) o |= AT_REMOVEDIR;
++#endif
++    return o;
+ }
++#else
++#define cosmo_oflags(f) (f)
++#define cosmo_atfd(d) (d)
++#define cosmo_atflags(f) (f)
++#endif
+ 
+ JNIEXPORT jint JNICALL
+ Java_sun_nio_fs_UnixNativeDispatcher_open0(JNIEnv* env, jclass this,
+@@ -506,7 +568,7 @@
+     jint fd;
+     const char* path = (const char*)jlong_to_ptr(pathAddress);
+ 
+-    RESTARTABLE(open(path, (int)oflags, (mode_t)mode), fd);
++    RESTARTABLE(open(path, cosmo_oflags((int)oflags), (mode_t)mode), fd);
+     if (fd == -1) {
+         throwUnixException(env, errno);
+     }
+@@ -525,7 +587,7 @@
+         return -1;
+     }
+ 
+-    RESTARTABLE((*my_openat_func)(dfd, path, (int)oflags, (mode_t)mode), fd);
++    RESTARTABLE((*my_openat_func)(cosmo_atfd(dfd), path, cosmo_oflags((int)oflags), (mode_t)mode), fd);
+     if (fd == -1) {
+         throwUnixException(env, errno);
+     }
+@@ -773,7 +835,7 @@
+         JNU_ThrowInternalError(env, "should not reach here");
+         return;
+     }
+-    RESTARTABLE((*my_fstatat_func)((int)dfd, path, &buf, (int)flag), err);
++    RESTARTABLE((*my_fstatat_func)(cosmo_atfd((int)dfd), path, &buf, cosmo_atflags((int)flag)), err);
+     if (err == -1) {
+         throwUnixException(env, errno);
+     } else {
+@@ -1040,7 +1102,7 @@
+     }
+ 
+     /* EINTR not listed as a possible error */
+-    if ((*my_unlinkat_func)((int)dfd, path, (int)flags) == -1) {
++    if ((*my_unlinkat_func)(cosmo_atfd((int)dfd), path, cosmo_atflags((int)flags)) == -1) {
+         throwUnixException(env, errno);
+     }
+ }
+--- jdk25u-jdk-25.0.4-ga/src/java.base/share/native/launcher/main.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/share/native/launcher/main.c
+@@ -33,6 +33,9 @@
+ #include "defines.h"
+ #include "jli_util.h"
+ #include "jni.h"
++#ifdef __COSMOPOLITAN__
++#include "cosmo.h"
++#endif
+ 
+ /*
+  * Entry point.
+@@ -52,7 +55,11 @@
+ JNIEXPORT int
+ main(int argc, char **argv)
+ {
+     const jboolean const_javaw = JNI_FALSE;
++#ifdef __COSMOPOLITAN__
++    /* Expand /zip/.args before JLI copies argv. Missing .args is fine. */
++    LoadZipArgs(&argc, &argv);
++#endif
+ #endif /* JAVAW */
+ 
+     int margc;

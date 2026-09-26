@@ -1,0 +1,14 @@
+# The public superconfigure HEAD verified with this overlay.
+superconfigure_repository=https://github.com/ahgamut/superconfigure.git
+superconfigure_ref=main
+superconfigure_commit=3afd6061e0c72d2e0e83a280c857e4459f3a0635
+target=lang/java
+artifacts=results/bin/java.com,results/libexec/java-modules.zip
+openjdk_source=jdk25u-jdk-25.0.4-ga.tar.gz
+openjdk_archive=https://github.com/openjdk/jdk25u/archive/refs/tags/jdk-25.0.4-ga.tar.gz
+openjdk_sha256=85934f45ebfde0024a76e3dce86218236c3712687689bf00f24c559ac1ed0e6a
+boot_jdk=OpenJDK25U-jdk_x64_linux_hotspot_25.0.4.1_1.tar.gz
+boot_jdk_archive=https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jdk_x64_linux_hotspot_25.0.4.1_1.tar.gz
+boot_jdk_sha256=dbb698396d478e7fa2b1e50f4103324b2a99b90569ee27c33f2261f9215cf41e
+base_runtime_modules=18
+optional_module_repository_modules=69

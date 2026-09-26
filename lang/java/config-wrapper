@@ -1,0 +1,100 @@
+#!/bin/sh
+set -eu
+: "${BASELOC:?}" "${CC:?}" "${CXX:?}" "${AR:?}" "${STRIP:?}" "${OBJCOPY:?}"
+SRC="$BASELOC/o/lang/java/jdk25u-jdk-25.0.4-ga"
+BOOT="$BASELOC/build-tools/openjdk25-boot"
+ARCH=${ARCH:-x86_64}
+cd "$SRC"
+
+# WSL's config.guess reports x86_64-pc-wsl, which OpenJDK maps to
+# windows-x86_64 and then runs fixpath/cmd.exe.  This port uses the Linux
+# HotSpot OS layer + Cosmopolitan, so force a Linux triplet.
+if [ "$(uname -s)" = Darwin ]; then
+  # Apple Silicon native aarch64 cosmocc.  The Linux x64 boot JDK in
+  # The Linux boot JDK cannot run here; use a host JDK 25 (Homebrew or BOOT_JDK).
+  # Resolve brew before shrinking PATH; the Linux PATH below has no Homebrew.
+  HB="${HOMEBREW_PREFIX:-}"
+  if [ -z "$HB" ] && command -v brew >/dev/null 2>&1; then
+    HB=$(brew --prefix)
+  fi
+  PATH="${HB:+$HB/bin:}${HB:+$HB/opt/make/libexec/gnubin:}/usr/bin:/bin:/usr/sbin:/sbin"
+  export PATH
+else
+  PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+  export PATH
+fi
+
+if [ "$(uname -s)" = Darwin ]; then
+  if [ -z "${BOOT_JDK:-}" ]; then
+    for cand in \
+      ${HB:+$HB/opt/openjdk@25/libexec/openjdk.jdk/Contents/Home} \
+      ${HB:+$HB/opt/openjdk/libexec/openjdk.jdk/Contents/Home}; do
+      if [ -n "$cand" ] && [ -x "$cand/bin/java" ]; then
+        BOOT_JDK=$cand
+        break
+      fi
+    done
+  fi
+  BOOT="${BOOT_JDK:?set BOOT_JDK to a macOS JDK 25 home}"
+  if [ "$ARCH" != aarch64 ]; then
+    echo "Darwin lang/java rebuild is aarch64-only; x86_64 slice is frozen winfix7" >&2
+    exit 1
+  fi
+  CONF_NAME=cosmo-release-aarch64
+  # cosmocc emits Linux ELF (Darwin cannot exec those probes).  Pretend the
+  # build platform is Linux x86 like the WSL recipe so toolchain-type=gcc is
+  # allowed; supply the host JDK 25 as Build JDK instead of compiling one.
+  TRIPLETS="--build=x86_64-unknown-linux-gnu --openjdk-target=aarch64-linux-gnu"
+  BUILD_CC="$BASELOC/lang/java/darwin-build-cc"
+  BUILD_CXX="$BASELOC/lang/java/darwin-build-cxx"
+  BUILD_JDK=$BOOT
+elif [ "$ARCH" = aarch64 ]; then
+  CONF_NAME=cosmo-release-aarch64
+  TRIPLETS="--build=x86_64-unknown-linux-gnu --openjdk-target=aarch64-linux-gnu"
+  BUILD_CC=/usr/bin/gcc
+  BUILD_CXX=/usr/bin/g++
+else
+  CONF_NAME=cosmo-release
+  TRIPLETS="--build=x86_64-unknown-linux-gnu --host=x86_64-unknown-linux-gnu"
+  BUILD_CC=
+  BUILD_CXX=
+fi
+
+TARGET_CC=$CC
+TARGET_CXX=$CXX
+if [ "$ARCH" = x86_64 ]; then
+  TARGET_CC="$BASELOC/lang/java/cosmocc-cc-no-tlscc"
+  TARGET_CXX="$BASELOC/lang/java/cosmocc-cxx-no-tlscc"
+fi
+
+rm -rf "$SRC/build/$CONF_NAME"
+
+# Important: OpenJDK's configure wrapper does not honor arbitrary exported
+# variables as expected.  Pass COSMOPOLITAN and tool variables on the command
+# line so they are recorded in spec.gmk.
+set -- bash configure \
+  --with-conf-name="$CONF_NAME" \
+  $TRIPLETS \
+  --with-boot-jdk="$BOOT" \
+  --with-toolchain-type=gcc \
+  --with-jvm-variants=server \
+  --with-jvm-features=-jfr,-zgc \
+  --with-debug-level=release \
+  --with-native-debug-symbols=none \
+  --enable-headless-only \
+  --disable-precompiled-headers \
+  --disable-warnings-as-errors \
+  --disable-linktime-gc \
+  --disable-javac-server \
+  COSMOPOLITAN=true \
+  CC="$TARGET_CC" CXX="$TARGET_CXX" AR="$AR" STRIP="$STRIP" OBJCOPY="$OBJCOPY"
+if [ -n "$BUILD_CC" ]; then
+  set -- "$@" BUILD_CC="$BUILD_CC" BUILD_CXX="$BUILD_CXX"
+fi
+if [ -n "${BUILD_JDK:-}" ]; then
+  set -- "$@" --with-build-jdk="$BUILD_JDK"
+fi
+if [ "$(uname -s)" = Darwin ] && command -v gmake >/dev/null 2>&1; then
+  set -- "$@" MAKE="$(command -v gmake)"
+fi
+exec "$@"

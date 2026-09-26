@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+: "${BASELOC:?}" "${RESULTS:?}" "${COSMOCC:?}"
+X86="$BASELOC/o/lang/java/install/x86_64/bin/java"
+ARM="$BASELOC/o/lang/java/install/aarch64/bin/java"
+PAYLOAD="$BASELOC/o/lang/java/install/x86_64/bin/jre-payload.zip"
+MODULE_REPOSITORY="$BASELOC/o/lang/java/install/x86_64/java-modules.zip"
+APELINK="$COSMOCC/bin/apelink"
+APE_X86="$COSMOCC/bin/ape-x86_64.elf"
+APE_ARM="$COSMOCC/bin/ape-aarch64.elf"
+APE_M1="$COSMOCC/bin/ape-m1.c"
+
+# Mac aarch64-only rebuild reuses the frozen winfix7 x86 slice and /zip
+# payload already inside results/bin/java.com.
+if [ ! -x "$X86" ] && [ -x "$RESULTS/bin/java.x86_64" ]; then
+  mkdir -p "$(dirname "$X86")"
+  cp -f "$RESULTS/bin/java.x86_64" "$X86"
+  chmod +x "$X86"
+fi
+if [ ! -f "$PAYLOAD" ] && [ -f "$RESULTS/bin/java.com" ]; then
+  mkdir -p "$(dirname "$PAYLOAD")"
+  PAYLOAD_STAGE=$(mktemp -d "${TMPDIR:-/tmp}/openjdk-payload.XXXXXX")
+  unzip -q -o "$RESULTS/bin/java.com" -d "$PAYLOAD_STAGE"
+  chmod -R u+rwX "$PAYLOAD_STAGE"
+  # APE unzip also drops .symtab.* with mode 000; pack only the JRE overlay.
+  ( cd "$PAYLOAD_STAGE" && zip -q -r "$PAYLOAD" conf lib modules usr )
+  rm -rf "$PAYLOAD_STAGE"
+fi
+test -x "$X86" || { echo "missing x86_64 launcher: $X86" >&2; exit 1; }
+test -x "$ARM" || { echo "missing aarch64 launcher: $ARM" >&2; exit 1; }
+test -f "$PAYLOAD" || { echo "missing JRE payload: $PAYLOAD" >&2; exit 1; }
+test -f "$MODULE_REPOSITORY" || { echo "missing Java module repository: $MODULE_REPOSITORY" >&2; exit 1; }
+test -f "$APELINK" || { echo "missing apelink: $APELINK" >&2; exit 1; }
+test -f "$APE_X86" || { echo "missing ape-x86_64.elf: $APE_X86" >&2; exit 1; }
+test -f "$APE_ARM" || { echo "missing ape-aarch64.elf: $APE_ARM" >&2; exit 1; }
+test -f "$APE_M1" || { echo "missing ape-m1.c: $APE_M1" >&2; exit 1; }
+run_apelink() {
+  if [ "$(uname -s)" = Darwin ]; then
+    /bin/sh "$APELINK" "$@"
+  else
+    "$APELINK" "$@"
+  fi
+}
+
+mkdir -p "$RESULTS/bin"
+mkdir -p "$RESULTS/libexec"
+cp -f "$MODULE_REPOSITORY" "$RESULTS/libexec/java-modules.zip"
+cp -f "$X86" "$RESULTS/bin/java.x86_64"
+cp -f "$ARM" "$RESULTS/bin/java.aarch64"
+chmod +x "$RESULTS/bin/java.x86_64" "$RESULTS/bin/java.aarch64"
+
+TMPAPE="$RESULTS/bin/java.com.tmp"
+rm -f "$TMPAPE" "$RESULTS/bin/java.com" "$RESULTS/bin/java-arm64.com"
+run_apelink \
+  -l "$APE_X86" \
+  -l "$APE_ARM" \
+  -M "$APE_M1" \
+  -o "$TMPAPE" \
+  "$RESULTS/bin/java.x86_64" \
+  "$RESULTS/bin/java.aarch64"
+chmod +x "$TMPAPE"
+
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/openjdk-cosmo-fat.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT INT TERM
+unzip -q "$PAYLOAD" -d "$STAGE"
+# Do NOT concatenate a zip with `cat`.  Info-ZIP must update the APE as a
+# self-extracting zip so its offsets/central directory are valid.
+( cd "$STAGE" && zip -q -r "$TMPAPE" . )
+mv "$TMPAPE" "$RESULTS/bin/java.com"
+chmod +x "$RESULTS/bin/java.com"

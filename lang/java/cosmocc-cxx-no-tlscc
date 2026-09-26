@@ -1,0 +1,13 @@
+#!/bin/sh
+# See cosmocc-cc-no-tlscc. Keep C++ compilation in GCC's native TLS domain.
+set -eu
+: "${BASELOC:?}"
+for arg; do
+  case "$arg" in
+    -c|-S)
+      exec "$BASELOC/cosmopolitan/cosmocc/bin/x86_64-unknown-cosmo-c++" \
+        -moptlinux -mno-red-zone "$@"
+      ;;
+  esac
+done
+exec "$BASELOC/cosmopolitan/cosmocc/bin/x86_64-unknown-cosmo-c++" "$@"

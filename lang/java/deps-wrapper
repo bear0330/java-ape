@@ -1,0 +1,75 @@
+#!/bin/sh
+set -eu
+: "${BASELOC:?BASELOC must be exported by superconfigure}"
+DIST="$BASELOC/distfiles"
+BOOT_TAR="$DIST/OpenJDK25U-jdk_x64_linux_hotspot_25.0.4.1_1.tar.gz"
+BOOT_URL="https://github.com/adoptium/temurin25-binaries/releases/download/jdk-25.0.4.1%2B1/OpenJDK25U-jdk_x64_linux_hotspot_25.0.4.1_1.tar.gz"
+
+fetch() {
+  dest=$1
+  url=$2
+  test -f "$dest" && return 0
+  lock="$dest.lock"
+  while ! mkdir "$lock" 2>/dev/null; do
+    test -f "$dest" && return 0
+    sleep 1
+  done
+  # Another architecture may have completed the download while this process
+  # was waiting to acquire the lock.
+  if test -f "$dest"; then
+    rmdir "$lock"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")"
+  tmp="$dest.tmp.$$"
+  trap 'rm -f "$tmp"; rmdir "$lock" 2>/dev/null || true' EXIT HUP INT TERM
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 -o "$tmp" "$url"
+  else
+    wget -O "$tmp" "$url"
+  fi
+  mv "$tmp" "$dest"
+  trap - EXIT HUP INT TERM
+  rmdir "$lock"
+}
+
+sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$@"
+  else
+    shasum -a 256 "$@"
+  fi
+}
+
+if [ "$(uname -s)" = Darwin ]; then
+  # Host javac comes from Homebrew/BOOT_JDK; the Linux x64 tarball cannot run.
+  for x in \
+    "$BASELOC/cosmopolitan/cosmocc/bin/aarch64-unknown-cosmo-cc" \
+    "$BASELOC/cosmopolitan/cosmocc/bin/aarch64-unknown-cosmo-c++" \
+    "$BASELOC/cosmopolitan/cosmocc/bin/aarch64-linux-cosmo-ar" \
+    "$BASELOC/cosmopolitan/cosmocc/bin/apelink"; do
+    test -x "$x" || { echo "missing required tool: $x" >&2; exit 1; }
+  done
+else
+  # .github/scripts/cosmo already prepares this tree.  Do not replace it
+  # with a stale Cosmopolitan source archive or a separate cosmocc release.
+  fetch "$BOOT_TAR" "$BOOT_URL"
+  echo 'dbb698396d478e7fa2b1e50f4103324b2a99b90569ee27c33f2261f9215cf41e  OpenJDK25U-jdk_x64_linux_hotspot_25.0.4.1_1.tar.gz' | (cd "$DIST" && sha256 -c -)
+  if ! test -x "$BASELOC/build-tools/openjdk25-boot/bin/java"; then
+    rm -rf "$BASELOC/build-tools/openjdk25-boot"
+    mkdir -p "$BASELOC/build-tools/openjdk25-boot"
+    tar xzf "$BOOT_TAR" --strip-components=1 -C "$BASELOC/build-tools/openjdk25-boot"
+  fi
+  for x in \
+    "$BASELOC/cosmopolitan/cosmocc/bin/x86_64-unknown-cosmo-cc" \
+    "$BASELOC/cosmopolitan/cosmocc/bin/x86_64-unknown-cosmo-c++" \
+    "$BASELOC/cosmopolitan/cosmocc/bin/x86_64-linux-cosmo-ar" \
+    "$BASELOC/cosmopolitan/cosmocc/bin/apelink" \
+    "$BASELOC/build-tools/openjdk25-boot/bin/java" \
+    "$BASELOC/build-tools/openjdk25-boot/bin/javac"; do
+    test -x "$x" || { echo "missing required tool: $x" >&2; exit 1; }
+  done
+fi
+
+command -v python3 >/dev/null
+command -v zip >/dev/null

@@ -1,0 +1,97 @@
+#!/bin/sh
+set -eu
+: "${BASELOC:?}" "${CC:?}"
+SRC="$BASELOC/o/lang/java/jdk25u-jdk-25.0.4-ga"
+ARCH=${ARCH:-x86_64}
+if [ "$ARCH" = aarch64 ]; then
+  CONF=cosmo-release-aarch64
+else
+  CONF=cosmo-release
+fi
+JOBS=${MAXPROC:-4}
+FIX="$BASELOC/lang/java/fix-constants.py"
+VALUES="$BASELOC/o/lang/java/cosmo-constants.values"
+cd "$SRC"
+
+# Superconfigure passes LOG=file / MAXPROC on the command line.  GNU make
+# forwards those through MAKEFLAGS into OpenJDK's make, which treats LOG as
+# its own logger and refuses LOG=file.
+unset LOG MAXPROC MAKEFLAGS MFLAGS
+# Darwin /usr/bin/make is 3.81; OpenJDK needs GNU make 4.
+if command -v gmake >/dev/null 2>&1; then
+  MAKE_CMD=gmake
+else
+  MAKE_CMD=make
+fi
+jdk_make() { "$MAKE_CMD" CONF="$CONF" JOBS="$JOBS" "$@"; }
+
+# 1) Reproduce static HotSpot first.
+jdk_make hotspot-server-static-libs
+
+if [ "$ARCH" = aarch64 ]; then
+  # Cosmopolitan constants are ABI-level.  On WSL x86, probe with the x86
+  # cosmocc; on Darwin ARM, probe with aarch64 cosmocc and apelink (see
+  # fix-constants.py).
+  if [ "$(uname -s)" = Darwin ]; then
+    PROBE_CC="$BASELOC/cosmopolitan/cosmocc/bin/aarch64-unknown-cosmo-cc"
+  else
+    PROBE_CC="$BASELOC/cosmopolitan/cosmocc/bin/x86_64-unknown-cosmo-cc"
+  fi
+  jdk_make java.base-gensrc
+  python3 "$FIX" \
+    --cc "$PROBE_CC" \
+    --gensrc "$SRC/build/$CONF/support/gensrc/java.base" \
+    --values-out "$VALUES.aarch64"
+  jdk_make \
+    java.base-static-libs \
+    java.management-static-libs \
+    java.prefs-static-libs
+  "$MAKE_CMD" -r -R \
+    -I "$SRC/make/common" \
+    SPEC="$SRC/build/$CONF/spec.gmk" \
+    -f "$SRC/make/StaticLibs.gmk" \
+    static-launcher
+  exit 0
+fi
+
+# 2) Generate java.base C-preprocessor sources, then repair only unresolved
+#    C constant value positions using the actual Cosmopolitan headers/runtime.
+jdk_make java.base-gensrc
+python3 "$FIX" \
+  --cc "$CC" \
+  --gensrc "$SRC/build/$CONF/support/gensrc/java.base" \
+  --values-out "$VALUES"
+
+# 3) Only native libraries needed by this JRE MVP.
+jdk_make \
+  java.base-static-libs \
+  java.management-static-libs \
+  java.prefs-static-libs
+
+# 4) Compile the minimal runtime modules on both architectures. The x86_64
+#    build additionally compiles every OpenJDK Java module into a separate
+#    repository ZIP; javacosmofy selectively appends modules from that asset.
+#    The runtime payload itself intentionally remains minimal.
+CORE_MODULES='java.base java.compiler java.logging java.management java.naming java.net.http java.prefs java.rmi java.scripting java.security.sasl java.sql java.transaction.xa java.xml jdk.crypto.ec jdk.naming.dns jdk.naming.rmi jdk.unsupported jdk.zipfs'
+if [ "$ARCH" = x86_64 ]; then
+  MODULES=$(find src -path '*/share/classes/module-info.java' -print | \
+    sed -E 's#^src/([^/]+)/share/classes/module-info\.java#\1#' | sort | tr '\n' ' ')
+else
+  MODULES=$CORE_MODULES
+fi
+TARGETS=''
+for m in $MODULES; do TARGETS="$TARGETS $m-java"; done
+# shellcheck disable=SC2086
+jdk_make $TARGETS
+
+# 5) Runtime data/configuration used under /zip.
+jdk_make \
+  java.base-gendata java.base-copy java.logging-copy java.xml-copy
+
+# 6) Narrow launcher-only link.  Do not use top-level `make static-launcher`:
+#    it recursively asks for every configured static JDK native module.
+"$MAKE_CMD" -r -R \
+  -I "$SRC/make/common" \
+  SPEC="$SRC/build/$CONF/spec.gmk" \
+  -f "$SRC/make/StaticLibs.gmk" \
+  static-launcher
