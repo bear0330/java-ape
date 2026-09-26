@@ -39,8 +39,8 @@ large Makefile needs an unlimited shell stack.
 
 ```sh
 cd /path/to/superconfigure
-./.github/scripts/setup
-./.github/scripts/cosmo
+bash ./.github/scripts/setup
+bash ./.github/scripts/cosmo
 MAXPROC=4 bash ./.github/scripts/collectbuild lang/java
 ```
 
