@@ -1,6 +1,7 @@
 --- a/.github/scripts/cosmo
 +++ b/.github/scripts/cosmo
-@@ -7,2 +7,8 @@ export COSMO="${COSMO:-$BASELOC/cosmopolitan}"
+@@ -6,6 +6,12 @@
+ export COSMO="${COSMO:-$BASELOC/cosmopolitan}"
  export RESULTS="${RESULTS:-$BASELOC/results}"
  export HOSTARCH="${HOSTARCH:-$(uname -m)}"
 +if command -v gmake >/dev/null 2>&1; then
@@ -9,7 +10,12 @@
 +    MAKE_CMD=$(command -v make)
 +fi
 +
-@@ -35 +41,18 @@
+ 
+ # create the COSMOS and related folders
+ cd "$BASELOC"
+@@ -33,6 +39,23 @@
+ echo "updating compiler binaries"
+ # don't need to download gcc binaries because package.sh does it
  cd "$COSMO"
 +if [ "$(uname -s)" = Darwin ]; then
 +    # dedupe is an AArch64 Linux ELF, which macOS cannot execute.  It only
@@ -28,12 +34,25 @@
 +    fi
 +fi
 +
-@@ -43 +66 @@
+ bash tool/cosmocc/package.sh cosmocc
+ 
+ # package.sh builds a bunch of MODEs, we only need x86_64 and aarch64
+@@ -41,15 +64,15 @@
+     o/x86_64-tiny/ o/x86_64-dbg o/x86_64-optlinux/
+ 
+ cd "$COSMO"
 -make m=$HOSTARCH -j$numproc o/$HOSTARCH/tool/build
 +"$MAKE_CMD" m=$HOSTARCH -j$numproc o/$HOSTARCH/tool/build
-@@ -46 +69 @@
+ 
 -make m=x86_64 V=0 -s -j$numproc \
 +"$MAKE_CMD" m=x86_64 V=0 -s -j$numproc \
-@@ -52 +75 @@
+     o/x86_64/third_party/bzip2\
+     o/x86_64/third_party/unzip\
+     o/x86_64/third_party/zip\
+     o/x86_64/third_party/zstd
+ 
 -make m=aarch64 V=0 -s -j$numproc \
 +"$MAKE_CMD" m=aarch64 V=0 -s -j$numproc \
+     o/aarch64/third_party/bzip2\
+     o/aarch64/third_party/unzip\
+     o/aarch64/third_party/zip\
