@@ -1,89 +1,96 @@
-# javacosmofy
+# Java for Cosmopolitan APE
 
-`javacosmofy` packages compiled Java class trees as a self-contained
-Cosmopolitan Java APE. It is itself a `java.com` plus `/zip/.args`; no updater,
-host `zip`, or Java compiler is needed after the initial bootstrap.
+This project contains the complete `lang/java` superconfigure overlay for the
+OpenJDK 25.0.4 JRE-only Cosmopolitan port. It builds a fat, portable
+`java.com` with x86_64 and aarch64 launchers, plus a separately packaged
+repository of optional Java modules.
 
-## Bootstrap
+The repository includes the actual OpenJDK patch, source checksum, configure,
+dependency, build, installation, packaging, module-repository scripts, and
+runtime tests. Superconfigure supplies the common framework and Cosmopolitan
+toolchain.
 
-Download `java.com` and, if needed, `java-modules.zip` from the
-[java-ape releases](https://github.com/bear0330/java-ape/releases). Keep both
-assets from the same release: javacosmofy verifies their embedded build
-fingerprints before adding optional modules.
+## Install the overlay
 
-Bootstrap javacosmofy with `java.com` and any local JDK that provides `javac`:
-
-```sh
-./scripts/bootstrap.sh /path/to/java.com
-JAVACOSMOFY_JAVAC=/path/to/jdk/bin/javac \
-  ./scripts/verify-native.sh
-```
-
-The JDK is only needed for this initial compilation. The resulting
-`dist/javacosmofy.com` runs its own `bundle` command and needs no host Java
-installation.
-
-## Example
+[`superconfigure.lock`](superconfigure.lock) pins the public superconfigure
+HEAD validated with this overlay. With no argument, the installer clones that base to
+`./superconfigure/`, installs this project's complete `lang/java` recipe, and
+adds its parent-catalog entry:
 
 ```sh
-/path/to/jdk/bin/javac \
-  -d .build/hello examples/hello/src/example/Hello.java
-./dist/javacosmofy.com bundle .build/hello --main example.Hello -o dist/hello.com
-./dist/hello.com 'two words'
-# Hello from embedded Java: two words
+./scripts/install-overlay.sh
 ```
 
-The generated APE carries this native startup configuration:
+To use an existing matching checkout, pass it explicitly:
+
+```sh
+./scripts/install-overlay.sh /path/to/superconfigure
+```
+
+The installer verifies the revision and backs up a replaced `lang/java` tree
+under `.ape-overlay-backups/`.
+
+## Build
+
+On WSL, clone into the Linux filesystem (for example `~/src`), not a
+`/mnt/c` or `/mnt/d` Windows mount: Cosmocc launches nested APE programs that
+DrvFs cannot run reliably. Then run `ulimit -s unlimited`; Cosmopolitan's
+large Makefile needs an unlimited shell stack.
+
+```sh
+cd /path/to/superconfigure
+bash ./.github/scripts/setup
+bash ./.github/scripts/cosmo
+MAXPROC=4 bash ./.github/scripts/collectbuild lang/java
+```
+
+`setup` clones Cosmopolitan at the base project's current revision, and
+`cosmo` generates its matching `cosmocc` toolchain. This overlay deliberately
+does not download a separate Cosmopolitan archive or a legacy cosmocc release.
+The Java recipe fetches and checksum-verifies OpenJDK and its Linux boot JDK on
+demand.
+
+It writes:
 
 ```text
--cp
-/zip/app/classes
-example.Hello
-...
+results/bin/java.com
+results/libexec/java-modules.zip
 ```
 
-`...` forwards caller arguments to the Java main class. Rebundling a generated
-`javacosmofy.com` uses its embedded base-runtime metadata, so old app payloads
-are not accumulated.
+`java.com` intentionally stays small: it contains 18 core runtime modules.
+`java-modules.zip` holds all 69 Java modules built from the matching OpenJDK
+tree. `javacosmofy` can add an application's requested module closure from
+that ZIP; source and patch fingerprints reject incompatible combinations.
 
-## More examples
-
-- [`examples/cfr`](examples/cfr/README.md) packages the CFR Java decompiler.
-- [`examples/picocli`](examples/picocli/README.md) builds and packages a
-  Picocli checksum application.
-- [`examples/jadx`](examples/jadx/README.md) packages the JADX Android CLI.
-- [`examples/tika`](examples/tika/README.md) packages the complete Apache Tika CLI.
-- [`examples/h2`](examples/h2/README.md) packages the H2 SQL Shell.
-- [`examples/awt`](examples/awt/README.md) tests an on-demand desktop module.
-
-## Runnable JAR distributions
-
-Use `--jar` for a self-contained runnable JAR. Override its manifest main class
-with `--main` when a distribution defaults to a GUI. For a thin launcher plus a
-distribution `lib/` directory, embed both with its CLI main class:
+## Use
 
 ```sh
-./dist/javacosmofy.com bundle app.jar --jar --classpath lib --main example.Main -o app.com
+./results/bin/java.com -version
+./results/bin/java.com -jar app.jar
+./results/bin/java.com -cp classes example.Main
 ```
 
-## Optional JDK modules
+The runtime includes a JIT and garbage collector. It does not yet support JNI.
+Optional Java class modules can be appended to an application APE, but native
+libraries such as AWT's `libawt` are not linked into this minimal runtime.
 
-`java.com` is intentionally minimal. The matching `java-modules.zip` release
-asset contains the remaining compiled Java modules. Install it beside
-javacosmofy when an application needs one:
+## Tested
+
+The standard `collectbuild lang/java` build was validated using the included
+runtime suite:
 
 ```sh
-./scripts/install-module-repository.sh /path/to/java-modules.zip
+./lang/java/validate.sh ./results/bin/java.com
 ```
 
-Then add only the modules an application needs. `javacosmofy` reads each
-module descriptor and adds its required-module closure automatically:
+It verifies the launcher, 18-module profile, JAR execution, `.args`, threads,
+files, NIO, DNS, loopback TCP, gzip, SHA-256, XML, logging, management,
+preferences, ZIP filesystem, timezone, TLS initialization, EC crypto, HTTP
+client, JDBC API, JNDI, and `Unsafe`. The optional repository was also checked
+to contain all 69 modules, including `java.desktop` and `java.datatransfer`.
 
-```sh
-./dist/javacosmofy.com bundle app.jar --jar --main example.Main \
-  --modules java.desktop -o app.com
-```
+## License
 
-The repository and `java.com` carry matching source/patch fingerprints; a
-mismatch is rejected. Module classes/resources can be appended this way, but
-native functionality still depends on code linked into the base runtime.
+This project is licensed under GPL-2.0-only.
+OpenJDK-derived files retain their upstream copyright and licensing terms, 
+including the Classpath Exception where upstream designates it.
