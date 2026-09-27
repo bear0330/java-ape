@@ -2328,3 +2328,41 @@
    // Note: keep this function, with its CPU_xx macros, *outside* the os namespace (see JDK-8289477).
    cpu_set_t cpus;  // can represent at most 1024 (CPU_SETSIZE) processors
    cpu_set_t* cpus_p = &cpus;
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.hpp
+@@ -118 +118,3 @@
++#if !defined(__COSMOPOLITAN__) || !defined(AMD64)
+   static THREAD_LOCAL Thread* _thr_current;
++#endif
+@@ -665 +667,5 @@
++#if defined(__COSMOPOLITAN__) && defined(AMD64)
++  return ThreadLocalStorage::is_initialized() ? ThreadLocalStorage::thread() : nullptr;
++#else
+   return _thr_current;
++#endif
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/runtime/thread.cpp
+@@ -54,4 +54,6 @@
+ 
++#if !defined(__COSMOPOLITAN__) || !defined(AMD64)
+ THREAD_LOCAL Thread* Thread::_thr_current = nullptr;
++#endif
+ 
+ // ======= Thread ========
+@@ -176,6 +178,8 @@
+ void Thread::initialize_thread_current() {
++#if !defined(__COSMOPOLITAN__) || !defined(AMD64)
+   assert(_thr_current == nullptr, "Thread::current already initialized");
+   _thr_current = this;
++#endif
+   assert(ThreadLocalStorage::thread() == nullptr, "ThreadLocalStorage::thread already initialized");
+   ThreadLocalStorage::set_thread(this);
+   assert(Thread::current() == ThreadLocalStorage::thread(), "TLS mismatch!");
+@@ -184,5 +188,7 @@
+ void Thread::clear_thread_current() {
+   assert(Thread::current() == ThreadLocalStorage::thread(), "TLS mismatch!");
++#if !defined(__COSMOPOLITAN__) || !defined(AMD64)
+   _thr_current = nullptr;
++#endif
+   ThreadLocalStorage::set_thread(nullptr);
+ }

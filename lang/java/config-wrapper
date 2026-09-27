@@ -62,10 +62,6 @@ fi
 
 TARGET_CC=$CC
 TARGET_CXX=$CXX
-if [ "$ARCH" = x86_64 ]; then
-  TARGET_CC="$BASELOC/lang/java/cosmocc-cc-no-tlscc"
-  TARGET_CXX="$BASELOC/lang/java/cosmocc-cxx-no-tlscc"
-fi
 
 rm -rf "$SRC/build/$CONF_NAME"
 
