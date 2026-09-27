@@ -1,5 +1,5 @@
 --- a/config/check_sha.sh
 +++ b/config/check_sha.sh
-@@ -13 +13 @@
--SRC_FILE=$(sed 's/^[0-9a-f]*\s*//g' check.signature)
+@@ -6 +6 @@
+-SRC_FILE=$(cat check.signature | sed 's/^[0-9a-f]*\s*//g')
 +SRC_FILE=$(sed 's/^[0-9a-f][0-9a-f]*[[:space:]]*//' check.signature)
