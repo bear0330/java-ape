@@ -2311,3 +2311,20 @@
  #endif /* JAVAW */
  
      int margc;
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/os/linux/os_linux.cpp
+@@ -4821,6 +4821,14 @@
+ // If anything goes wrong we fallback to returning the number of online
+ // processors - which can be greater than the number available to the process.
+ static int get_active_processor_count() {
++#ifdef __COSMOPOLITAN__
++  // Darwin has no Linux affinity mask. Avoid its ENOSYS wrapper and use the
++  // same online-processor fallback HotSpot uses for affinity failures.
++  if (IsXnu()) {
++    return checked_cast<int>(::sysconf(_SC_NPROCESSORS_ONLN));
++  }
++#endif
++
+   // Note: keep this function, with its CPU_xx macros, *outside* the os namespace (see JDK-8289477).
+   cpu_set_t cpus;  // can represent at most 1024 (CPU_SETSIZE) processors
+   cpu_set_t* cpus_p = &cpus;

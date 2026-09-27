@@ -1,0 +1,39 @@
+--- a/.github/scripts/cosmo
++++ b/.github/scripts/cosmo
+@@ -7,2 +7,8 @@ export COSMO="${COSMO:-$BASELOC/cosmopolitan}"
+ export RESULTS="${RESULTS:-$BASELOC/results}"
+ export HOSTARCH="${HOSTARCH:-$(uname -m)}"
++if command -v gmake >/dev/null 2>&1; then
++    MAKE_CMD=$(command -v gmake)
++else
++    MAKE_CMD=$(command -v make)
++fi
++
+@@ -35 +41,18 @@
+ cd "$COSMO"
++if [ "$(uname -s)" = Darwin ]; then
++    # dedupe is an AArch64 Linux ELF, which macOS cannot execute.  It only
++    # reduces package size, so leave all package contents intact and skip it.
++    PACKAGE_SCRIPT=tool/cosmocc/package.sh
++    if ! grep -Fq 'Java APE overlay: skip ELF dedupe on Darwin' "$PACKAGE_SCRIPT"; then
++        sed -i '' '/^\$DEDUPE -s "\$OUTDIR\/"$/c\
++# Java APE overlay: skip ELF dedupe on Darwin\
++if [ "$(uname -s)" != Darwin ]; then\
++  $DEDUPE -s "$OUTDIR/"\
++fi' "$PACKAGE_SCRIPT"
++        grep -Fq 'Java APE overlay: skip ELF dedupe on Darwin' "$PACKAGE_SCRIPT" || {
++            echo "unable to patch $PACKAGE_SCRIPT for Darwin" >&2
++            exit 1
++        }
++    fi
++fi
++
+@@ -43 +66 @@
+-make m=$HOSTARCH -j$numproc o/$HOSTARCH/tool/build
++"$MAKE_CMD" m=$HOSTARCH -j$numproc o/$HOSTARCH/tool/build
+@@ -46 +69 @@
+-make m=x86_64 V=0 -s -j$numproc \
++"$MAKE_CMD" m=x86_64 V=0 -s -j$numproc \
+@@ -52 +75 @@
+-make m=aarch64 V=0 -s -j$numproc \
++"$MAKE_CMD" m=aarch64 V=0 -s -j$numproc \

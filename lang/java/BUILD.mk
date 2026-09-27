@@ -7,9 +7,23 @@ JAVA_URL := https://github.com/openjdk/jdk25u/archive/refs/tags/jdk-25.0.4-ga.ta
 
 $(eval $(call DOWNLOAD_SOURCE,lang/java,$(JAVA_SRC)))
 
+# The generic patch rule has no implicit patch-file lookup.
+o/lang/java/patched: PATCH_FILE = $(BASELOC)/lang/java/minimal.diff
+o/lang/java/patched: $(BASELOC)/lang/java/minimal.diff
+o/lang/java/patched: PATCH_COMMAND = $(BASELOC)/lang/java/patch-wrapper
+
 # Keep the verified source archive in distfiles/, but fetch it on demand.
 o/lang/java/downloaded: DL_FILE = $(JAVA_URL)
 o/lang/java/downloaded: DL_COMMAND = $(BASELOC)/lang/java/download-wrapper $(JAVA_SRC)
+
+.PHONY: o/lang/java/darwin-build-guard
+o/lang/java/darwin-build-guard:
+	$(BASELOC)/lang/java/darwin-build-guard --check
+
+# Check both a clean build and a request that would otherwise reuse stale
+# stage files. Order-only keeps the guard from invalidating Linux builds.
+o/lang/java/downloaded: | o/lang/java/darwin-build-guard
+o/lang/java/built.fat: | o/lang/java/darwin-build-guard
 
 o/lang/java/deps.x86_64: DEPS_COMMAND = $(BASELOC)/lang/java/deps-wrapper
 o/lang/java/configured.x86_64: CONFIG_COMMAND = $(BASELOC)/lang/java/config-wrapper

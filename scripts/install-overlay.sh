@@ -26,4 +26,21 @@ if [ -e "$DESTINATION" ]; then mkdir -p "$BACKUPS/lang"; mv "$DESTINATION" "$BAC
 mkdir -p "$SUPER/lang"
 cp -a "$ROOT/lang/java" "$DESTINATION"
 grep -Fqx 'include lang/java/BUILD.mk' "$SUPER/lang/BUILD.mk" || printf '\ninclude lang/java/BUILD.mk\n' >> "$SUPER/lang/BUILD.mk"
+
+# The locked base's BSD-sed parser, Cosmocc's Linux-ELF dedupe helper, and
+# macOS make 3.81 require narrowly scoped Darwin-only framework patches.
+if [ "$(uname -s)" = Darwin ]; then
+  CHECK_SHA=$SUPER/config/check_sha.sh
+  if grep -Fq '\s' "$CHECK_SHA"; then
+    mkdir -p "$BACKUPS/config"
+    cp -p "$CHECK_SHA" "$BACKUPS/config/check_sha.sh"
+    patch --forward -d "$SUPER" -p1 < "$ROOT/scripts/darwin-check-sha.patch"
+  fi
+  COSMO_SCRIPT=$SUPER/.github/scripts/cosmo
+  if ! grep -Fq 'Java APE overlay: skip ELF dedupe on Darwin' "$COSMO_SCRIPT"; then
+    mkdir -p "$BACKUPS/.github/scripts"
+    cp -p "$COSMO_SCRIPT" "$BACKUPS/.github/scripts/cosmo"
+    patch --forward -d "$SUPER" -p1 < "$ROOT/scripts/darwin-cosmo.patch"
+  fi
+fi
 printf 'Installed Java overlay into %s. Backup: %s\n' "$SUPER" "$BACKUPS"

@@ -1,0 +1,25 @@
+#!/bin/sh
+set -eu
+
+if [ "$(uname -s)" = Darwin ]; then
+  cat >&2 <<'EOF'
+Java APE cannot build a complete java.com on macOS.
+
+The fat artifact requires an x86_64 OpenJDK slice. That slice runs Linux ELF
+configuration probes, which macOS cannot execute. Build the complete artifact
+on Linux or WSL instead:
+
+  bash ./.github/scripts/setup
+  bash ./.github/scripts/cosmo
+  bash ./.github/scripts/collectbuild lang/java
+
+Then copy results/bin/java.com and results/libexec/java-modules.zip to macOS.
+EOF
+  exit 1
+fi
+
+if [ "${1:-}" = --check ]; then
+  exit 0
+fi
+
+exec "$(dirname "$0")/download-wrapper" "$@"

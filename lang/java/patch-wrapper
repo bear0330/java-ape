@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+patch_file=${1:?patch file required}
+archive=sources.tar.gz
+source_dir=jdk25u-jdk-25.0.4-ga
+
+[ -f "$archive" ] || { echo "missing OpenJDK archive: $archive" >&2; exit 1; }
+[ -f "$patch_file" ] || { echo "missing OpenJDK patch: $patch_file" >&2; exit 1; }
+
+# `patched` is a timestamp target. Recreate this known archive root when its
+# patch input changes, rather than trying to apply a changed aggregate diff to
+# an already-patched source tree.
+if [ -d "$source_dir" ]; then
+  rm -rf -- "$source_dir"
+fi
+tar xf "$archive"
+exec patch -p0 -i "$patch_file"
