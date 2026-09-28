@@ -70,9 +70,69 @@ that ZIP; source and patch fingerprints reject incompatible combinations.
 ./results/bin/java.com -cp classes example.Main
 ```
 
-The runtime includes a JIT and garbage collector. It does not yet support JNI.
-Optional Java class modules can be appended to an application APE, but native
-libraries such as AWT's `libawt` are not linked into this minimal runtime.
+The runtime includes a JIT and garbage collector. It does not yet support
+conventional JNI shared libraries. Instead, it provides an opt-in Host Services
+backend for Java native methods. Optional Java class modules can be appended
+to an application APE, but native shared libraries such as AWT's `libawt` are
+not embedded in the minimal runtime.
+
+## Native methods and Host Services
+
+`java.com` first uses ordinary JNI resolution. If a native symbol is not
+present and both Host Services variables are set, it can instead call a local
+provider that supplies the Java-visible behaviour of that native method. The
+provider replaces the implementation; it does not emulate the original shared
+library's JNI internals.
+
+```mermaid
+flowchart TD
+    A[Java code calls a native method] --> B{Ordinary JNI symbol found?}
+    B -->|yes| C[Run the linked JNI implementation]
+    B -->|no| D{JAVA_APE_HOST and token configured?}
+    D -->|no| E[UnsatisfiedLinkError]
+    D -->|yes| F[POST exact method identity and values to Host]
+    F --> G[Provider implements Java-visible behaviour]
+    G --> H[Return value or structured error]
+
+    I[System.loadLibrary name] --> J{Name listed in JAVA_APE_VIRTUAL_LIBRARIES?}
+    J -->|no| K[Normal shared-library loading]
+    J -->|yes| L[Treat name as loaded; export no JNI symbols]
+    L --> B
+```
+
+Enable a local provider explicitly:
+
+```sh
+export JAVA_APE_HOST=http://127.0.0.1:49321
+export JAVA_APE_HOST_TOKEN='replace-with-a-random-secret'
+./results/bin/java.com -jar app.jar
+```
+
+Some existing libraries call `System.loadLibrary()` before their first native
+method. If a provider deliberately replaces such a library, list only its
+exact name:
+
+```sh
+export JAVA_APE_VIRTUAL_LIBRARIES=awt,fontmanager
+./results/bin/java.com -jar app.jar
+```
+
+This only bypasses the shared-library load. It does not invent JNI symbols:
+each unresolved method still reaches the provider under its exact JVM identity,
+such as `java.awt.image.ColorModel.initIDs()V`. A provider may return success
+for an initialization method when its replacement implementation has no need
+for the original library's private JNI caches.
+
+The v1 protocol is HTTP with a JSON control header and optional raw binary
+payload. It supports primitive values, strings, primitive arrays, `byte[]`,
+and copied `ByteBuffer` data. It intentionally does not transport arbitrary
+Java object references, callbacks, or remote JNI state. See
+[`docs/java-host-services.md`](docs/java-host-services.md) for the exact wire
+format, response errors, and the boot-loaded Level 2 shim API.
+
+For an end-to-end provider example, see
+[`bear0330/tika-ape`](https://github.com/bear0330/tika-ape), which packages
+Apache Tika as a portable executable for use from Python and other languages.
 
 ## Tested
 
@@ -80,7 +140,7 @@ The standard `collectbuild lang/java` build was validated using the included
 runtime suite:
 
 ```sh
-./lang/java/validate.sh ./results/bin/java.com
+./scripts/test-overlay.sh /path/to/superconfigure
 ```
 
 It verifies the launcher, 18-module profile, JAR execution, `.args`, threads,
@@ -89,8 +149,31 @@ preferences, ZIP filesystem, timezone, TLS initialization, EC crypto, HTTP
 client, JDBC API, JNDI, and `Unsafe`. The optional repository was also checked
 to contain all 69 modules, including `java.desktop` and `java.datatransfer`.
 
+Host Services has a separate localhost protocol smoke test. It exercises
+disabled-by-default lookup, exact virtual-library names, interpreter and
+compiled native call paths, binary values, primitive arrays, the Level 2 shim,
+and structured authentication errors:
+
+```sh
+BASELOC=/path/to/superconfigure \
+  ./tests/java/host-services-smoke.sh /path/to/superconfigure/results/bin/java.com
+```
+
 ## License
 
 This project is licensed under GPL-2.0-only.
 OpenJDK-derived files retain their upstream copyright and licensing terms, 
 including the Classpath Exception where upstream designates it.
+
+## Disclosure and project status
+
+Most of this experimental project was produced with substantial AI assistance.
+The author defined the project boundaries, integration approach, and design
+questions, including the Host Services backend for Java native methods.
+
+It has been tested on Windows x64, WSL, Linux x86_64, Linux arm64, and macOS
+arm64. This is not complete validation across every platform supported by APE.
+
+This project is primarily experimental and may not be production-ready. Anyone
+interested in taking on long-term, production-quality maintenance is welcome
+to adopt and maintain it.

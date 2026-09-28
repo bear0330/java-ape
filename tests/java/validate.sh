@@ -9,10 +9,10 @@ echo "==> $JAVA -version"
 "$JAVA" -version
 echo "==> $JAVA --list-modules"
 "$JAVA" --list-modules
-echo "==> $JAVA -jar tests/hello.jar"
-"$JAVA" -jar "$ROOT/tests/hello.jar"
+echo "==> $JAVA -jar hello.jar"
+"$JAVA" -jar "$ROOT/hello.jar"
 echo "==> zip .args"
-/bin/sh "$ROOT/tests/smoke-zipargs.sh" "$JAVA"
+/bin/sh "$ROOT/smoke-zipargs.sh" "$JAVA"
 
 HTTP_PID=
 cleanup() {
@@ -22,9 +22,9 @@ cleanup() {
   fi
 }
 trap cleanup EXIT INT TERM
-python3 -m http.server 18080 --bind 127.0.0.1 --directory "$ROOT/tests/http-root" >/dev/null 2>&1 &
+python3 -m http.server 18080 --bind 127.0.0.1 --directory "$ROOT/http-root" >/dev/null 2>&1 &
 HTTP_PID=$!
 sleep 0.3
 
-echo "==> $JAVA -cp tests Smoke"
-"$JAVA" -cp "$ROOT/tests" Smoke http://127.0.0.1:18080/
+echo "==> $JAVA -cp tests/java Smoke"
+"$JAVA" -cp "$ROOT" Smoke http://127.0.0.1:18080/

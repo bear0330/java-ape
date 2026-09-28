@@ -2366,3 +2366,686 @@
 +#endif
    ThreadLocalStorage::set_thread(nullptr);
  }
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/prims/nativeLookup.hpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/prims/nativeLookup.hpp
+@@ -47,6 +47,10 @@
+ 
+   // Lookup native function. May throw UnsatisfiedLinkError.
+   static address lookup(const methodHandle& method, TRAPS);
++
++  // Java APE host-native entries are descriptor-aware wrappers rather than
++  // ordinary JNI symbols. SharedRuntime uses this to marshal jvalue arrays.
++  static bool is_java_ape_host_entry(address entry);
+ };
+ 
+ #endif // SHARE_PRIMS_NATIVELOOKUP_HPP
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/share/prims/nativeLookup.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/share/prims/nativeLookup.cpp
+@@ -27,6 +27,8 @@
+ #include "classfile/systemDictionary.hpp"
+ #include "classfile/vmClasses.hpp"
+ #include "classfile/vmSymbols.hpp"
++#include "code/codeCache.hpp"
++#include "code/nmethod.hpp"
+ #include "logging/log.hpp"
+ #include "logging/logTag.hpp"
+ #include "memory/oopFactory.hpp"
+@@ -43,14 +45,18 @@
+ #include "prims/unsafe.hpp"
+ #include "prims/scopedMemoryAccess.hpp"
+ #include "runtime/arguments.hpp"
++#include "runtime/frame.inline.hpp"
+ #include "runtime/handles.inline.hpp"
+ #include "runtime/interfaceSupport.inline.hpp"
++#include "runtime/jniHandles.hpp"
+ #include "runtime/javaCalls.hpp"
++#include "runtime/javaThread.hpp"
+ #include "runtime/os.hpp"
+ #include "runtime/sharedRuntime.hpp"
+ #include "runtime/signature.hpp"
+ #include "utilities/macros.hpp"
+ #include "utilities/utf8.hpp"
++#include <cstdlib>
+ #if INCLUDE_JFR
+ #include "jfr/jfr.hpp"
+ #endif
+@@ -249,6 +255,199 @@
+   return nullptr;
+ }
+ 
++// Java APE Host Services is a deliberately narrow, value-oriented escape
++// hatch. It is enabled only when both environment variables are present.
++// The per-method native wrapper supplies the Method and an already marshalled
++// jvalue array, so these fixed C signatures never depend on a JNI method ABI.
++static bool java_ape_host_enabled() {
++#ifdef __COSMOPOLITAN__
++  const char* host = ::getenv("JAVA_APE_HOST");
++  const char* token = ::getenv("JAVA_APE_HOST_TOKEN");
++  return host != nullptr && *host != '\0' && token != nullptr && *token != '\0';
++#else
++  return false;
++#endif
++}
++
++static jobject java_ape_host_box(JNIEnv* env, BasicType type, jvalue value) {
++  if (is_reference_type(type)) return value.l;
++  const char* klass = nullptr;
++  const char* signature = nullptr;
++  switch (type) {
++    case T_BOOLEAN: klass = "java/lang/Boolean";   signature = "(Z)Ljava/lang/Boolean;"; break;
++    case T_BYTE:    klass = "java/lang/Byte";      signature = "(B)Ljava/lang/Byte;"; break;
++    case T_CHAR:    klass = "java/lang/Character"; signature = "(C)Ljava/lang/Character;"; break;
++    case T_SHORT:   klass = "java/lang/Short";     signature = "(S)Ljava/lang/Short;"; break;
++    case T_INT:     klass = "java/lang/Integer";   signature = "(I)Ljava/lang/Integer;"; break;
++    case T_LONG:    klass = "java/lang/Long";      signature = "(J)Ljava/lang/Long;"; break;
++    case T_FLOAT:   klass = "java/lang/Float";     signature = "(F)Ljava/lang/Float;"; break;
++    case T_DOUBLE:  klass = "java/lang/Double";    signature = "(D)Ljava/lang/Double;"; break;
++    default: return nullptr;
++  }
++  jclass c = env->FindClass(klass);
++  if (c == nullptr) return nullptr;
++  jmethodID value_of = env->GetStaticMethodID(c, "valueOf", signature);
++  if (value_of == nullptr) return nullptr;
++  switch (type) {
++    case T_BOOLEAN: return env->CallStaticObjectMethod(c, value_of, value.z);
++    case T_BYTE:    return env->CallStaticObjectMethod(c, value_of, value.b);
++    case T_CHAR:    return env->CallStaticObjectMethod(c, value_of, value.c);
++    case T_SHORT:   return env->CallStaticObjectMethod(c, value_of, value.s);
++    case T_INT:     return env->CallStaticObjectMethod(c, value_of, value.i);
++    case T_LONG:    return env->CallStaticObjectMethod(c, value_of, value.j);
++    case T_FLOAT:   return env->CallStaticObjectMethod(c, value_of, value.f);
++    case T_DOUBLE:  return env->CallStaticObjectMethod(c, value_of, value.d);
++    default: ShouldNotReachHere(); return nullptr;
++  }
++}
++
++static Method* java_ape_host_current_method(bool* interpreted) {
++  JavaThread* thread = JavaThread::current();
++  if (!thread->has_last_Java_frame()) return nullptr;
++  frame caller = thread->last_frame();
++  if (caller.is_interpreted_frame()) {
++    *interpreted = true;
++    return caller.interpreter_frame_method();
++  }
++  nmethod* wrapper = CodeCache::find_nmethod(thread->last_Java_pc());
++  return wrapper == nullptr ? nullptr : wrapper->method();
++}
++
++static jvalue* java_ape_host_interpreter_values(Method* method) {
++  JavaThread* thread = JavaThread::current();
++  frame caller = thread->last_frame();
++  jvalue* values = NEW_RESOURCE_ARRAY(jvalue, method->size_of_parameters());
++  int index = method->is_static() ? 0 : 1;
++  for (SignatureStream ss(method->signature()); !ss.at_return_type(); ss.next(), ++index) {
++    intptr_t* slot = caller.interpreter_frame_local_at(
++        index + ((ss.type() == T_LONG || ss.type() == T_DOUBLE) ? 1 : 0));
++    switch (ss.type()) {
++      case T_BOOLEAN: values[index].z = *(jboolean*)slot; break;
++      case T_BYTE:    values[index].b = *(jbyte*)slot; break;
++      case T_CHAR:    values[index].c = *(jchar*)slot; break;
++      case T_SHORT:   values[index].s = *(jshort*)slot; break;
++      case T_INT:     values[index].i = *(jint*)slot; break;
++      case T_LONG:    values[index].j = *(jlong*)slot; ++index; break;
++      case T_FLOAT:   values[index].f = *(jfloat*)slot; break;
++      case T_DOUBLE:  values[index].d = *(jdouble*)slot; ++index; break;
++      case T_ARRAY:
++      case T_OBJECT: {
++        oop value = *(oop*)slot;
++        values[index].l = value == nullptr ? nullptr : JNIHandles::make_local(value);
++        break;
++      }
++      default: ShouldNotReachHere();
++    }
++  }
++  return values;
++}
++
++static jobject java_ape_host_invoke(JNIEnv* env, jvalue* values) {
++  bool interpreted = false;
++  Method* method = java_ape_host_current_method(&interpreted);
++  if (method == nullptr) return nullptr;
++  if (interpreted) values = java_ape_host_interpreter_values(method);
++  jclass host = env->FindClass("com/nuwainfo/javaape/HostServices");
++  if (host == nullptr) return nullptr;
++  jmethodID call = env->GetStaticMethodID(host, "callNative",
++      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;");
++  if (call == nullptr) return nullptr;
++  jclass object = env->FindClass("java/lang/Object");
++  if (object == nullptr) return nullptr;
++  int count = 0;
++  for (SignatureStream ss(method->signature()); !ss.at_return_type(); ss.next()) ++count;
++  jobjectArray args = env->NewObjectArray(count, object, nullptr);
++  if (args == nullptr) return nullptr;
++  int index = method->is_static() ? 0 : 1;
++  int out = 0;
++  for (SignatureStream ss(method->signature()); !ss.at_return_type(); ss.next(), ++index, ++out) {
++    jobject boxed = java_ape_host_box(env, ss.type(), values[index]);
++    if (env->ExceptionCheck()) return nullptr;
++    env->SetObjectArrayElement(args, out, boxed);
++    if (env->ExceptionCheck()) return nullptr;
++    if (ss.type() == T_LONG || ss.type() == T_DOUBLE) ++index;
++  }
++  jstring owner = env->NewStringUTF(method->klass_name()->as_C_string());
++  jstring name = env->NewStringUTF(method->name()->as_C_string());
++  jstring descriptor = env->NewStringUTF(method->signature()->as_C_string());
++  if (owner == nullptr || name == nullptr || descriptor == nullptr) return nullptr;
++  return env->CallStaticObjectMethod(host, call, owner, name, descriptor, args);
++}
++
++static jboolean JNICALL java_ape_host_boolean(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values);
++  if (result == nullptr) return JNI_FALSE;
++  jclass c = env->GetObjectClass(result);
++  jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "booleanValue", "()Z");
++  return m == nullptr ? JNI_FALSE : env->CallBooleanMethod(result, m);
++}
++static jbyte JNICALL java_ape_host_byte(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "byteValue", "()B");
++  return m == nullptr ? 0 : env->CallByteMethod(result, m);
++}
++static jchar JNICALL java_ape_host_char(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "charValue", "()C");
++  return m == nullptr ? 0 : env->CallCharMethod(result, m);
++}
++static jshort JNICALL java_ape_host_short(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "shortValue", "()S");
++  return m == nullptr ? 0 : env->CallShortMethod(result, m);
++}
++static jint JNICALL java_ape_host_int(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "intValue", "()I");
++  return m == nullptr ? 0 : env->CallIntMethod(result, m);
++}
++static jlong JNICALL java_ape_host_long(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "longValue", "()J");
++  return m == nullptr ? 0 : env->CallLongMethod(result, m);
++}
++static jfloat JNICALL java_ape_host_float(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "floatValue", "()F");
++  return m == nullptr ? 0 : env->CallFloatMethod(result, m);
++}
++static jdouble JNICALL java_ape_host_double(JNIEnv* env, jobject, Method*, jvalue* values) {
++  jobject result = java_ape_host_invoke(env, values); if (result == nullptr) return 0;
++  jclass c = env->GetObjectClass(result); jmethodID m = c == nullptr ? nullptr : env->GetMethodID(c, "doubleValue", "()D");
++  return m == nullptr ? 0 : env->CallDoubleMethod(result, m);
++}
++static jobject JNICALL java_ape_host_object(JNIEnv* env, jobject, Method*, jvalue* values) {
++  return java_ape_host_invoke(env, values);
++}
++static void JNICALL java_ape_host_void(JNIEnv* env, jobject, Method*, jvalue* values) {
++  (void) java_ape_host_invoke(env, values);
++}
++
++static address java_ape_host_entry(BasicType type) {
++  switch (type) {
++    case T_BOOLEAN: return CAST_FROM_FN_PTR(address, java_ape_host_boolean);
++    case T_BYTE:    return CAST_FROM_FN_PTR(address, java_ape_host_byte);
++    case T_CHAR:    return CAST_FROM_FN_PTR(address, java_ape_host_char);
++    case T_SHORT:   return CAST_FROM_FN_PTR(address, java_ape_host_short);
++    case T_INT:     return CAST_FROM_FN_PTR(address, java_ape_host_int);
++    case T_LONG:    return CAST_FROM_FN_PTR(address, java_ape_host_long);
++    case T_FLOAT:   return CAST_FROM_FN_PTR(address, java_ape_host_float);
++    case T_DOUBLE:  return CAST_FROM_FN_PTR(address, java_ape_host_double);
++    case T_ARRAY:
++    case T_OBJECT:  return CAST_FROM_FN_PTR(address, java_ape_host_object);
++    case T_VOID:    return CAST_FROM_FN_PTR(address, java_ape_host_void);
++    default: ShouldNotReachHere(); return nullptr;
++  }
++}
++
++bool NativeLookup::is_java_ape_host_entry(address entry) {
++  return entry == java_ape_host_entry(T_BOOLEAN) || entry == java_ape_host_entry(T_BYTE)
++      || entry == java_ape_host_entry(T_CHAR) || entry == java_ape_host_entry(T_SHORT)
++      || entry == java_ape_host_entry(T_INT) || entry == java_ape_host_entry(T_LONG)
++      || entry == java_ape_host_entry(T_FLOAT) || entry == java_ape_host_entry(T_DOUBLE)
++      || entry == java_ape_host_entry(T_OBJECT) || entry == java_ape_host_entry(T_VOID);
++}
++
+ address NativeLookup::lookup_style(const methodHandle& method, char* pure_name, const char* long_name, int args_size, TRAPS) {
+   address entry;
+   const char* jni_name = compute_complete_jni_name(pure_name, long_name, args_size);
+@@ -407,6 +606,10 @@
+     }
+   }
+ 
++  if (java_ape_host_enabled()) {
++    return java_ape_host_entry(method->result_type());
++  }
++
+   // Native function not found, throw UnsatisfiedLinkError
+   stringStream ss;
+   ss.print("'");
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/x86/sharedRuntime_x86_64.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/x86/sharedRuntime_x86_64.cpp
+@@ -44,6 +44,7 @@
+ #include "oops/klass.inline.hpp"
+ #include "oops/method.inline.hpp"
+ #include "prims/methodHandles.hpp"
++#include "prims/nativeLookup.hpp"
+ #include "runtime/continuation.hpp"
+ #include "runtime/continuationEntry.inline.hpp"
+ #include "runtime/globals.hpp"
+@@ -1836,6 +1837,7 @@
+   }
+   address native_func = method->native_function();
+   assert(native_func != nullptr, "must have function");
++  const bool is_java_ape_host = NativeLookup::is_java_ape_host_entry(native_func);
+ 
+   // An OopMap for lock (and class if static)
+   OopMapSet *oop_maps = new OopMapSet();
+@@ -1848,19 +1850,24 @@
+   // the hidden arguments as arg[0] and possibly arg[1] (static method)
+ 
+   const int total_in_args = method->size_of_parameters();
+-  int total_c_args = total_in_args + (method->is_static() ? 2 : 1);
++  int total_c_args = is_java_ape_host ? 4 : total_in_args + (method->is_static() ? 2 : 1);
+ 
+   BasicType* out_sig_bt = NEW_RESOURCE_ARRAY(BasicType, total_c_args);
+   VMRegPair* out_regs   = NEW_RESOURCE_ARRAY(VMRegPair, total_c_args);
+ 
+   int argc = 0;
+   out_sig_bt[argc++] = T_ADDRESS;
+-  if (method->is_static()) {
++  if (is_java_ape_host) {
+     out_sig_bt[argc++] = T_OBJECT;
+-  }
+-
+-  for (int i = 0; i < total_in_args ; i++ ) {
+-    out_sig_bt[argc++] = in_sig_bt[i];
++    out_sig_bt[argc++] = T_ADDRESS;  // Method*
++    out_sig_bt[argc++] = T_ADDRESS;  // jvalue*
++  } else {
++    if (method->is_static()) {
++      out_sig_bt[argc++] = T_OBJECT;
++    }
++    for (int i = 0; i < total_in_args ; i++ ) {
++      out_sig_bt[argc++] = in_sig_bt[i];
++    }
+   }
+ 
+   // Now figure out where the args must be stored and how much stack space
+@@ -1882,6 +1889,12 @@
+   int oop_handle_offset = stack_slots;
+   stack_slots += total_save_slots;
+ 
++  int java_ape_values_offset = -1;
++  if (is_java_ape_host) {
++    java_ape_values_offset = stack_slots;
++    stack_slots += total_in_args * VMRegImpl::slots_per_word;
++  }
++
+   // Now any space we need for handlizing a klass if static method
+ 
+   int klass_slot_offset = 0;
+@@ -2046,17 +2059,27 @@
+ 
+ #endif /* ASSERT */
+ 
+-  // For JNI natives the incoming and outgoing registers are offset upwards.
+-  GrowableArray<int> arg_order(2 * total_in_args);
++  VMRegPair* java_ape_values = nullptr;
++  if (is_java_ape_host) {
++    java_ape_values = NEW_RESOURCE_ARRAY(VMRegPair, total_in_args);
++    for (int i = 0; i < total_in_args; ++i) {
++      java_ape_values[i].set2(VMRegImpl::stack2reg(java_ape_values_offset + i * VMRegImpl::slots_per_word));
++    }
++  }
+ 
+-  for (int i = total_in_args - 1, c_arg = total_c_args - 1; i >= 0; i--, c_arg--) {
+-    arg_order.push(i);
+-    arg_order.push(c_arg);
++  // For ordinary JNI natives the incoming and outgoing registers are offset upwards.
++  GrowableArray<int> arg_order(2 * total_in_args);
++  if (!is_java_ape_host) {
++    for (int i = total_in_args - 1, c_arg = total_c_args - 1; i >= 0; i--, c_arg--) {
++      arg_order.push(i);
++      arg_order.push(c_arg);
++    }
+   }
+ 
+-  for (int ai = 0; ai < arg_order.length(); ai += 2) {
+-    int i = arg_order.at(ai);
+-    int c_arg = arg_order.at(ai + 1);
++  for (int ai = 0; ai < (is_java_ape_host ? total_in_args * 2 : arg_order.length()); ai += 2) {
++    int i = is_java_ape_host ? total_in_args - 1 - ai / 2 : arg_order.at(ai);
++    int c_arg = is_java_ape_host ? -1 : arg_order.at(ai + 1);
++    VMRegPair* target = is_java_ape_host ? &java_ape_values[i] : &out_regs[c_arg];
+     __ block_comment(err_msg("move %d -> %d", i, c_arg));
+ #ifdef ASSERT
+     if (in_regs[i].first()->is_Register()) {
+@@ -2064,16 +2087,16 @@
+     } else if (in_regs[i].first()->is_XMMRegister()) {
+       assert(!freg_destroyed[in_regs[i].first()->as_XMMRegister()->encoding()], "destroyed reg!");
+     }
+-    if (out_regs[c_arg].first()->is_Register()) {
++    if (!is_java_ape_host && out_regs[c_arg].first()->is_Register()) {
+       reg_destroyed[out_regs[c_arg].first()->as_Register()->encoding()] = true;
+-    } else if (out_regs[c_arg].first()->is_XMMRegister()) {
++    } else if (!is_java_ape_host && out_regs[c_arg].first()->is_XMMRegister()) {
+       freg_destroyed[out_regs[c_arg].first()->as_XMMRegister()->encoding()] = true;
+     }
+ #endif /* ASSERT */
+     switch (in_sig_bt[i]) {
+       case T_ARRAY:
+       case T_OBJECT:
+-        __ object_move(map, oop_handle_offset, stack_slots, in_regs[i], out_regs[c_arg],
++        __ object_move(map, oop_handle_offset, stack_slots, in_regs[i], *target,
+                     ((i == 0) && (!is_static)),
+                     &receiver_offset);
+         break;
+@@ -2081,24 +2104,24 @@
+         break;
+ 
+       case T_FLOAT:
+-        __ float_move(in_regs[i], out_regs[c_arg]);
++        __ float_move(in_regs[i], *target);
+           break;
+ 
+       case T_DOUBLE:
+         assert( i + 1 < total_in_args &&
+                 in_sig_bt[i + 1] == T_VOID &&
+-                out_sig_bt[c_arg+1] == T_VOID, "bad arg list");
+-        __ double_move(in_regs[i], out_regs[c_arg]);
++                (is_java_ape_host || out_sig_bt[c_arg+1] == T_VOID), "bad arg list");
++        __ double_move(in_regs[i], *target);
+         break;
+ 
+       case T_LONG :
+-        __ long_move(in_regs[i], out_regs[c_arg]);
++        __ long_move(in_regs[i], *target);
+         break;
+ 
+       case T_ADDRESS: assert(false, "found T_ADDRESS in java args");
+ 
+       default:
+-        __ move32_64(in_regs[i], out_regs[c_arg]);
++        __ move32_64(in_regs[i], *target);
+     }
+   }
+ 
+@@ -2108,7 +2131,7 @@
+   // the normal JNI call code.
+   // point c_arg at the first arg that is already loaded in case we
+   // need to spill before we call out
+-  c_arg = total_c_args - total_in_args;
++  c_arg = is_java_ape_host ? 1 : total_c_args - total_in_args;
+ 
+   if (method->is_static()) {
+ 
+@@ -2127,6 +2150,14 @@
+     c_arg--;
+   }
+ 
++  if (is_java_ape_host) {
++    if (!method->is_static()) {
++      __ movptr(c_rarg1, Address(rsp, java_ape_values_offset * VMRegImpl::stack_slot_size));
++    }
++    __ mov_metadata(c_rarg2, method());
++    __ lea(c_rarg3, Address(rsp, java_ape_values_offset * VMRegImpl::stack_slot_size));
++  }
++
+   // Change state to native (we save the return address in the thread, since it might not
+   // be pushed on the stack when we do a stack traversal). It is enough that the pc()
+   // points into the right code segment. It does not have to be the correct return pc.
+--- jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/sharedRuntime_aarch64.cpp
++++ jdk25u-jdk-25.0.4-ga/src/hotspot/cpu/aarch64/sharedRuntime_aarch64.cpp
+@@ -41,6 +41,7 @@
+ #include "oops/klass.inline.hpp"
+ #include "oops/method.inline.hpp"
+ #include "prims/methodHandles.hpp"
++#include "prims/nativeLookup.hpp"
+ #include "runtime/continuation.hpp"
+ #include "runtime/continuationEntry.inline.hpp"
+ #include "runtime/globals.hpp"
+@@ -1430,6 +1431,7 @@
+   }
+   address native_func = method->native_function();
+   assert(native_func != nullptr, "must have function");
++  const bool is_java_ape_host = NativeLookup::is_java_ape_host_entry(native_func);
+ 
+   // An OopMap for lock (and class if static)
+   OopMapSet *oop_maps = new OopMapSet();
+@@ -1442,19 +1444,24 @@
+   // the hidden arguments as arg[0] and possibly arg[1] (static method)
+ 
+   const int total_in_args = method->size_of_parameters();
+-  int total_c_args = total_in_args + (method->is_static() ? 2 : 1);
++  int total_c_args = is_java_ape_host ? 4 : total_in_args + (method->is_static() ? 2 : 1);
+ 
+   BasicType* out_sig_bt = NEW_RESOURCE_ARRAY(BasicType, total_c_args);
+   VMRegPair* out_regs   = NEW_RESOURCE_ARRAY(VMRegPair, total_c_args);
+ 
+   int argc = 0;
+   out_sig_bt[argc++] = T_ADDRESS;
+-  if (method->is_static()) {
++  if (is_java_ape_host) {
+     out_sig_bt[argc++] = T_OBJECT;
+-  }
+-
+-  for (int i = 0; i < total_in_args ; i++ ) {
+-    out_sig_bt[argc++] = in_sig_bt[i];
++    out_sig_bt[argc++] = T_ADDRESS;  // Method*
++    out_sig_bt[argc++] = T_ADDRESS;  // jvalue*
++  } else {
++    if (method->is_static()) {
++      out_sig_bt[argc++] = T_OBJECT;
++    }
++    for (int i = 0; i < total_in_args ; i++ ) {
++      out_sig_bt[argc++] = in_sig_bt[i];
++    }
+   }
+ 
+   // Now figure out where the args must be stored and how much stack space
+@@ -1480,6 +1487,12 @@
+   int oop_handle_offset = stack_slots;
+   stack_slots += total_save_slots;
+ 
++  int java_ape_values_offset = -1;
++  if (is_java_ape_host) {
++    java_ape_values_offset = stack_slots;
++    stack_slots += total_in_args * VMRegImpl::slots_per_word;
++  }
++
+   // Now any space we need for handlizing a klass if static method
+ 
+   int klass_slot_offset = 0;
+@@ -1632,35 +1645,45 @@
+ 
+ #endif /* ASSERT */
+ 
+-  // For JNI natives the incoming and outgoing registers are offset upwards.
+-  GrowableArray<int> arg_order(2 * total_in_args);
++  VMRegPair* java_ape_values = nullptr;
++  if (is_java_ape_host) {
++    java_ape_values = NEW_RESOURCE_ARRAY(VMRegPair, total_in_args);
++    for (int i = 0; i < total_in_args; ++i) {
++      java_ape_values[i].set2(VMRegImpl::stack2reg(java_ape_values_offset + i * VMRegImpl::slots_per_word));
++    }
++  }
+ 
+-  for (int i = total_in_args - 1, c_arg = total_c_args - 1; i >= 0; i--, c_arg--) {
+-    arg_order.push(i);
+-    arg_order.push(c_arg);
++  // For ordinary JNI natives the incoming and outgoing registers are offset upwards.
++  GrowableArray<int> arg_order(2 * total_in_args);
++  if (!is_java_ape_host) {
++    for (int i = total_in_args - 1, c_arg = total_c_args - 1; i >= 0; i--, c_arg--) {
++      arg_order.push(i);
++      arg_order.push(c_arg);
++    }
+   }
+ 
+-  for (int ai = 0; ai < arg_order.length(); ai += 2) {
+-    int i = arg_order.at(ai);
+-    int c_arg = arg_order.at(ai + 1);
++  for (int ai = 0; ai < (is_java_ape_host ? total_in_args * 2 : arg_order.length()); ai += 2) {
++    int i = is_java_ape_host ? total_in_args - 1 - ai / 2 : arg_order.at(ai);
++    int c_arg = is_java_ape_host ? -1 : arg_order.at(ai + 1);
++    VMRegPair* target = is_java_ape_host ? &java_ape_values[i] : &out_regs[c_arg];
+     __ block_comment(err_msg("move %d -> %d", i, c_arg));
+-    assert(c_arg != -1 && i != -1, "wrong order");
++    assert((is_java_ape_host || c_arg != -1) && i != -1, "wrong order");
+ #ifdef ASSERT
+     if (in_regs[i].first()->is_Register()) {
+       assert(!reg_destroyed[in_regs[i].first()->as_Register()->encoding()], "destroyed reg!");
+     } else if (in_regs[i].first()->is_FloatRegister()) {
+       assert(!freg_destroyed[in_regs[i].first()->as_FloatRegister()->encoding()], "destroyed reg!");
+     }
+-    if (out_regs[c_arg].first()->is_Register()) {
++    if (!is_java_ape_host && out_regs[c_arg].first()->is_Register()) {
+       reg_destroyed[out_regs[c_arg].first()->as_Register()->encoding()] = true;
+-    } else if (out_regs[c_arg].first()->is_FloatRegister()) {
++    } else if (!is_java_ape_host && out_regs[c_arg].first()->is_FloatRegister()) {
+       freg_destroyed[out_regs[c_arg].first()->as_FloatRegister()->encoding()] = true;
+     }
+ #endif /* ASSERT */
+     switch (in_sig_bt[i]) {
+       case T_ARRAY:
+       case T_OBJECT:
+-        __ object_move(map, oop_handle_offset, stack_slots, in_regs[i], out_regs[c_arg],
++        __ object_move(map, oop_handle_offset, stack_slots, in_regs[i], *target,
+                        ((i == 0) && (!is_static)),
+                        &receiver_offset);
+         int_args++;
+@@ -1669,34 +1692,34 @@
+         break;
+ 
+       case T_FLOAT:
+-        __ float_move(in_regs[i], out_regs[c_arg]);
++        __ float_move(in_regs[i], *target);
+         float_args++;
+         break;
+ 
+       case T_DOUBLE:
+         assert( i + 1 < total_in_args &&
+                 in_sig_bt[i + 1] == T_VOID &&
+-                out_sig_bt[c_arg+1] == T_VOID, "bad arg list");
+-        __ double_move(in_regs[i], out_regs[c_arg]);
++                (is_java_ape_host || out_sig_bt[c_arg+1] == T_VOID), "bad arg list");
++        __ double_move(in_regs[i], *target);
+         float_args++;
+         break;
+ 
+       case T_LONG :
+-        __ long_move(in_regs[i], out_regs[c_arg]);
++        __ long_move(in_regs[i], *target);
+         int_args++;
+         break;
+ 
+       case T_ADDRESS: assert(false, "found T_ADDRESS in java args");
+ 
+       default:
+-        __ move32_64(in_regs[i], out_regs[c_arg]);
++        __ move32_64(in_regs[i], *target);
+         int_args++;
+     }
+   }
+ 
+   // point c_arg at the first arg that is already loaded in case we
+   // need to spill before we call out
+-  int c_arg = total_c_args - total_in_args;
++  int c_arg = is_java_ape_host ? 1 : total_c_args - total_in_args;
+ 
+   // Pre-load a static method's oop into c_rarg1.
+   if (method->is_static()) {
+@@ -1715,6 +1738,14 @@
+     c_arg--;
+   }
+ 
++  if (is_java_ape_host) {
++    if (!method->is_static()) {
++      __ ldr(c_rarg1, Address(sp, java_ape_values_offset * VMRegImpl::stack_slot_size));
++    }
++    __ mov_metadata(c_rarg2, method());
++    __ lea(c_rarg3, Address(sp, java_ape_values_offset * VMRegImpl::stack_slot_size));
++  }
++
+   // Change state to native (we save the return address in the thread, since it might not
+   // be pushed on the stack when we do a stack traversal). It is enough that the pc()
+   // points into the right code segment. It does not have to be the correct return pc.
+--- jdk25u-jdk-25.0.4-ga/src/java.base/share/native/launcher/main.c
++++ jdk25u-jdk-25.0.4-ga/src/java.base/share/native/launcher/main.c
+@@ -121,6 +121,15 @@
+ 
+         // Add first arg, which is the app name
+         JLI_List_add(args, JLI_StringDup(argv[0]));
++#ifdef __COSMOPOLITAN__
++        // HostServices is shipped in the APE's JRE payload. Put it on the
++        // bootstrap append path so a native-resolution fallback can use it
++        // before application class-path setup has happened. This option is
++        // inert unless a native method is otherwise unresolved and both host
++        // environment variables have been supplied.
++        JLI_List_add(args, JLI_StringDup(
++            "-Xbootclasspath/a:/zip/lib/java-ape/classes"));
++#endif
+         // Append JDK_JAVA_OPTIONS
+         if (JLI_AddArgsFromEnvVar(args, JDK_JAVA_OPTIONS)) {
+             // JLI_SetTraceLauncher is not called yet
+--- jdk25u-jdk-25.0.4-ga/src/java.base/share/classes/jdk/internal/loader/NativeLibraries.java
++++ jdk25u-jdk-25.0.4-ga/src/java.base/share/classes/jdk/internal/loader/NativeLibraries.java
+@@ -236,6 +236,13 @@
+     public NativeLibrary loadLibrary(Class<?> fromClass, String name) {
+         assert name.indexOf(File.separatorChar) < 0;
+ 
++        // A Java APE host binding can explicitly declare a library virtual.
++        // This deliberately bypasses only dlopen; unresolved native methods
++        // still follow normal JNI lookup before the Host Services fallback.
++        if (isVirtualLibrary(name)) {
++            return new VirtualNativeLibrary(name);
++        }
++
+         NativeLibrary lib = findFromPaths(LibraryPaths.SYS_PATHS, fromClass, name);
+         if (lib == null && searchJavaLibraryPath) {
+             lib = findFromPaths(LibraryPaths.USER_PATHS, fromClass, name);
+@@ -243,6 +250,19 @@
+         return lib;
+     }
+ 
++    private static boolean isVirtualLibrary(String name) {
++        String configured = System.getenv("JAVA_APE_VIRTUAL_LIBRARIES");
++        if (configured == null || configured.isEmpty()) {
++            return false;
++        }
++        for (String candidate : configured.split(",", -1)) {
++            if (name.equals(candidate.trim())) {
++                return true;
++            }
++        }
++        return false;
++    }
++
+     private NativeLibrary findFromPaths(String[] paths, Class<?> fromClass, String name) {
+         for (String path : paths) {
+             File libfile = new File(path, System.mapLibraryName(name));
+@@ -338,6 +358,26 @@
+         }
+     }
+ 
++    // A virtual library intentionally exports no JNI symbols. It merely lets
++    // explicitly opted-in Java code reach descriptor-aware native resolution.
++    private static final class VirtualNativeLibrary extends NativeLibrary {
++        private final String name;
++
++        VirtualNativeLibrary(String name) {
++            this.name = name;
++        }
++
++        @Override
++        public String name() {
++            return name;
++        }
++
++        @Override
++        public long find(String symbol) {
++            return 0;
++        }
++    }
++
+     /*
+      * The run() method will be invoked when this class loader becomes
+      * phantom reachable to unload the native library.

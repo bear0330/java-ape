@@ -1,0 +1,30 @@
+#!/bin/sh
+# Builds the boot-loadable Java APE Host Services JAR using the same JDK that
+# bootstraps OpenJDK.  The output is deliberately a build artifact.
+set -eu
+
+: "${BASELOC:?BASELOC is required}"
+OUT=${1:?output JAR is required}
+SRC="$BASELOC/lang/java/host-shim/src/main/java"
+BOOT=${BOOT_JDK:-$BASELOC/build-tools/openjdk25-boot}
+
+if [ ! -x "$BOOT/bin/javac" ]; then
+  if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
+    JAVAC=$(command -v javac)
+    JAR=$(command -v jar)
+  else
+    echo "missing javac/jar for Java APE Host Services (set BOOT_JDK)" >&2
+    exit 1
+  fi
+else
+  JAVAC="$BOOT/bin/javac"
+  JAR="$BOOT/bin/jar"
+fi
+
+test -d "$SRC" || { echo "missing host shim sources: $SRC" >&2; exit 1; }
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/java-ape-host.XXXXXX")
+trap 'rm -rf "$WORK"' EXIT HUP INT TERM
+mkdir -p "$(dirname "$OUT")"
+
+find "$SRC" -name '*.java' -print0 | xargs -0 "$JAVAC" --release 17 -d "$WORK/classes"
+"$JAR" --create --file "$OUT" -C "$WORK/classes" .

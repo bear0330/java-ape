@@ -36,6 +36,12 @@ fi
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/openjdk-cosmo-jre.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT INT TERM
 mkdir -p "$STAGE/modules" "$STAGE/conf" "$STAGE/lib/security"
+HOST_SHIM="$BASELOC/o/lang/java/host-shim/java-ape-host.jar"
+"$BASELOC/lang/java/build-host-shim" "$HOST_SHIM"
+mkdir -p "$STAGE/lib/java-ape"
+cp -f "$HOST_SHIM" "$STAGE/lib/java-ape/host-services.jar"
+mkdir -p "$STAGE/lib/java-ape/classes"
+unzip -q "$HOST_SHIM" -d "$STAGE/lib/java-ape/classes"
 PATCH_SHA256=$(sha256sum "$BASELOC/lang/java/minimal.diff" | awk '{print $1}')
 SOURCE_SHA256=$(awk 'NR == 1 { print $1 }' "$BASELOC/lang/java/check.signature")
 mkdir -p "$STAGE/.__javacosmofy__"

@@ -4,6 +4,7 @@
 
 JAVA_SRC := $(BASELOC)/distfiles/jdk25u-jdk-25.0.4-ga.tar.gz
 JAVA_URL := https://github.com/openjdk/jdk25u/archive/refs/tags/jdk-25.0.4-ga.tar.gz
+JAVA_HOST_SHIM := $(BASELOC)/lang/java/host-shim/src/main/java/com/nuwainfo/javaape/HostServices.java
 
 $(eval $(call DOWNLOAD_SOURCE,lang/java,$(JAVA_SRC)))
 
@@ -20,8 +21,9 @@ o/lang/java/downloaded: DL_COMMAND = $(BASELOC)/lang/java/download-wrapper $(JAV
 o/lang/java/darwin-build-guard:
 	$(BASELOC)/lang/java/darwin-build-guard --check
 
-# Check both a clean build and a request that would otherwise reuse stale
-# stage files. Order-only keeps the guard from invalidating Linux builds.
+# A complete fat artifact needs both Linux ELF slices. On Darwin, stop before
+# a build can reuse stale files or reach OpenJDK's unexecutable x86_64 probes.
+# Order-only keeps this diagnostic from invalidating Linux builds.
 o/lang/java/downloaded: | o/lang/java/darwin-build-guard
 o/lang/java/built.fat: | o/lang/java/darwin-build-guard
 
@@ -29,11 +31,13 @@ o/lang/java/deps.x86_64: DEPS_COMMAND = $(BASELOC)/lang/java/deps-wrapper
 o/lang/java/configured.x86_64: CONFIG_COMMAND = $(BASELOC)/lang/java/config-wrapper
 o/lang/java/built.x86_64: BUILD_COMMAND = $(BASELOC)/lang/java/build-wrapper
 o/lang/java/installed.x86_64: INSTALL_COMMAND = $(BASELOC)/lang/java/install-wrapper
+o/lang/java/installed.x86_64: $(BASELOC)/lang/java/pack-jre $(BASELOC)/lang/java/build-host-shim $(JAVA_HOST_SHIM)
 
 o/lang/java/deps.aarch64: DEPS_COMMAND = $(BASELOC)/lang/java/deps-wrapper
 o/lang/java/configured.aarch64: CONFIG_COMMAND = $(BASELOC)/lang/java/config-wrapper
 o/lang/java/built.aarch64: BUILD_COMMAND = $(BASELOC)/lang/java/build-wrapper
 o/lang/java/installed.aarch64: INSTALL_COMMAND = $(BASELOC)/lang/java/install-wrapper
+o/lang/java/installed.aarch64: $(BASELOC)/lang/java/pack-jre $(BASELOC)/lang/java/build-host-shim $(JAVA_HOST_SHIM)
 
 # OpenJDK regenerates one source-tree configure script.  Do not let the two
 # architecture rules regenerate it concurrently under make -j.
