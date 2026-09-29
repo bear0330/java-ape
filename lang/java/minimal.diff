@@ -2161,17 +2161,203 @@
  #include "jni.h"
  #include "jvm.h"
  #include "jvm_md.h"
-@@ -716,6 +721,10 @@
+@@ -534,8 +534,158 @@
+     return resultPid;
+ }
+ 
++#ifdef __COSMOPOLITAN__
++/*
++ * Cosmopolitan's regular fork() on Windows duplicates the entire process.
++ * That is unsuitable for a JVM: creating the temporary copy can fail before
++ * execve() gets a chance to replace it. Its posix_spawn() implementation can
++ * instead use vfork(), which reaches CreateProcess() without cloning the VM.
++ *
++ * We cannot use the JDK's normal POSIX_SPAWN implementation here because it
++ * starts the JDK-specific jspawnhelper, which is intentionally absent from the
++ * self-contained APE runtime. Configure the target directly with spawn file
++ * actions instead. This remains a Windows-only Cosmopolitan path; other
++ * platforms retain the established fork fallback below.
++ */
++static int
++cosmoWindowsSpawnProgram(pid_t *pid, const char *program,
++                         const posix_spawn_file_actions_t *actions,
++                         const posix_spawnattr_t *attributes,
++                         char *const argv[], char *const envp[])
++{
++    const char *path;
++    const char *entry;
++    const char *end;
++    char *candidate;
++    size_t programLength;
++    int result;
++    int savedError = 0;
++
++    if (strchr(program, '/') != NULL || strchr(program, '\\') != NULL ||
++        (isalpha((unsigned char) program[0]) && program[1] == ':')) {
++        return posix_spawn(pid, program, actions, attributes, argv, envp);
++    }
++
++    path = getenv("PATH");
++    if (path == NULL || strchr(path, ';') == NULL) {
++        return posix_spawnp(pid, program, actions, attributes, argv, envp);
++    }
++
++    programLength = strlen(program);
++    candidate = malloc(strlen(path) + programLength + 2);
++    if (candidate == NULL) {
++        return ENOMEM;
++    }
++
++    for (entry = path; ; entry = end + 1) {
++        size_t entryLength;
++
++        end = strchr(entry, ';');
++        entryLength = end == NULL ? strlen(entry) : (size_t) (end - entry);
++        memcpy(candidate, entry, entryLength);
++        if (entryLength != 0 && candidate[entryLength - 1] != '/' &&
++            candidate[entryLength - 1] != '\\') {
++            candidate[entryLength++] = '/';
++        }
++        memcpy(candidate + entryLength, program, programLength + 1);
++
++        result = posix_spawn(pid, candidate, actions, attributes, argv, envp);
++        if (result == 0) {
++            free(candidate);
++            return 0;
++        }
++        if (result == EACCES) {
++            savedError = result;
++        } else if (result != ENOENT && result != ENOTDIR) {
++            free(candidate);
++            return result;
++        }
++        if (end == NULL) {
++            break;
++        }
++    }
++
++    free(candidate);
++    return savedError != 0 ? savedError : ENOENT;
++}
++
++static int
++cosmoWindowsAddDup2(posix_spawn_file_actions_t *actions, int from, int to)
++{
++    if (from == to) {
++        return 0;
++    }
++    return posix_spawn_file_actions_adddup2(actions, from, to);
++}
++
++static pid_t
++cosmoWindowsSpawnChild(ChildStuff *c)
++{
++    pid_t resultPid = -1;
++    int attributesInitialized = 0;
++    int input;
++    int output;
++    int error;
++    int result;
++    posix_spawn_file_actions_t actions;
++    posix_spawnattr_t attributes;
++
++    result = posix_spawn_file_actions_init(&actions);
++    if (result != 0) {
++        errno = result;
++        return -1;
++    }
++    result = posix_spawnattr_init(&attributes);
++    if (result == 0) {
++        attributesInitialized = 1;
++        result = posix_spawnattr_setflags(&attributes,
++                                          POSIX_SPAWN_USEVFORK);
++    }
++
++    input = c->in[0] != -1 ? c->in[0] : c->fds[0];
++    output = c->out[1] != -1 ? c->out[1] : c->fds[1];
++    error = c->err[1] != -1 ? c->err[1] : c->fds[2];
++    if (result == 0) {
++        result = cosmoWindowsAddDup2(&actions, input, STDIN_FILENO);
++    }
++    if (result == 0) {
++        result = cosmoWindowsAddDup2(&actions, output, STDOUT_FILENO);
++    }
++    if (result == 0 && c->redirectErrorStream) {
++        result = cosmoWindowsAddDup2(&actions, STDOUT_FILENO, STDERR_FILENO);
++    } else if (result == 0) {
++        result = cosmoWindowsAddDup2(&actions, error, STDERR_FILENO);
++    }
++    if (result == 0 && c->pdir != NULL) {
++        result = posix_spawn_file_actions_addchdir_np(&actions, c->pdir);
++    }
++
++    if (result == 0) {
++        result = cosmoWindowsSpawnProgram(&resultPid, c->argv[0], &actions,
++                                          &attributes, (char *const *) c->argv,
++                                          c->envv == NULL ? environ :
++                                                            (char *const *) c->envv);
++    }
++
++    if (attributesInitialized) {
++        posix_spawnattr_destroy(&attributes);
++    }
++    posix_spawn_file_actions_destroy(&actions);
++    if (result != 0) {
++        errno = result;
++        return -1;
++    }
++    return resultPid;
++}
++#endif
++
+ static pid_t
+ spawnChild(JNIEnv *env, jobject process, ChildStuff *c, const char *helperpath) {
++#ifdef __COSMOPOLITAN__
++    if (IsWindows()) {
++        return cosmoWindowsSpawnChild(c);
++    }
++#endif
+     pid_t resultPid;
+     int i, offset, rval, bufsize, magic;
+     char *buf, buf1[(3 * 11) + 3]; // "%d:%d:%d\0"
+@@ -716,6 +915,13 @@
      childenv[0] = childenv[1] = -1;
      // Reset errno to protect against bogus error messages
      errno = 0;
 +#ifdef __COSMOPOLITAN__
-+    // No /zip/lib/jspawnhelper.  posix_spawn on XNU returns errno 0.
-+    mode = MODE_FORK;
++    /* No /zip/lib/jspawnhelper on Unix-like hosts. On Windows,
++     * spawnChild() uses Cosmopolitan's direct CreateProcess-backed path. */
++    if (!IsWindows()) {
++        mode = MODE_FORK;
++    }
 +#endif
  
      if ((c = NEW(ChildStuff, 1)) == NULL) return -1;
      c->argv = NULL;
+@@ -754,4 +960,10 @@
+-    if (mode == MODE_FORK || mode == MODE_VFORK) {
++#ifdef __COSMOPOLITAN__
++    /* Windows direct spawn inherits only the dup2() destinations below.
++     * CLOEXEC is safer here than close file actions in its vfork table. */
++    if (mode == MODE_FORK || mode == MODE_VFORK || IsWindows()) {
++#else
++    if (mode == MODE_FORK || mode == MODE_VFORK) {
++#endif
+         /* We cannot downport the full breadth of JDK-8377907 to JDK 25 and earlier, since such
+          * a change (including prerequisites) would be far too invasive for LTS releases. We
+          * therefore only downport a very small part of it, namely the fix for the FORK/VFORK
+@@ -811,6 +1023,11 @@
+     * Note that we could do this additional handshake in all modes but for
+     * prudence only do it when it is needed (in posix_spawn mode). */
+     c->sendAlivePing = (mode == MODE_POSIX_SPAWN) ? 1 : 0;
++#ifdef __COSMOPOLITAN__
++    if (IsWindows()) {
++        c->sendAlivePing = 0;
++    }
++#endif
+ 
+     resultPid = startChild(env, process, c, phelperpath);
+     assert(resultPid != 0);
 --- jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
 +++ jdk25u-jdk-25.0.4-ga/src/java.base/unix/native/libnio/fs/UnixNativeDispatcher.c
 @@ -28,6 +28,10 @@
