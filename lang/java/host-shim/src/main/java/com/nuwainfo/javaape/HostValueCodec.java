@@ -1,93 +1,72 @@
 package com.nuwainfo.javaape;
 
-import java.io.ByteArrayOutputStream;
 import java.lang.reflect.Array;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.Base64;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
+/** Converts Java values to the value-oriented APE Host Services wire ABI. */
 final class HostValueCodec {
   private HostValueCodec() {
   }
 
-  static void appendRequestValue(StringBuilder json, ByteArrayOutputStream binary, Object value) {
+  static Map<String, Object> encodeRequestValue(Object value, HostReferenceArena arena) {
     if (value == null) {
-      json.append("{\"type\":\"null\"}");
-      return;
+      return typed("null", null);
     }
-
     if (value instanceof Boolean) {
-      appendBoolean(json, (Boolean) value);
-      return;
+      return typed("boolean", value);
     }
-
     if (value instanceof Byte) {
-      appendNumber(json, "byte", value);
-      return;
+      return typed("byte", value);
     }
-
     if (value instanceof Short) {
-      appendNumber(json, "short", value);
-      return;
+      return typed("short", value);
     }
-
     if (value instanceof Character) {
-      appendCharacter(json, (Character) value);
-      return;
+      return typed("char", value.toString());
     }
-
     if (value instanceof Integer) {
-      appendNumber(json, "int", value);
-      return;
+      return typed("int", value);
     }
-
     if (value instanceof Long) {
-      appendNumber(json, "long", value);
-      return;
+      return typed("long", value);
     }
-
     if (value instanceof Float) {
-      appendFiniteNumber(json, "float", ((Float) value).doubleValue());
-      return;
+      return finite("float", ((Float) value).doubleValue());
     }
-
     if (value instanceof Double) {
-      appendFiniteNumber(json, "double", (Double) value);
-      return;
+      return finite("double", (Double) value);
     }
-
     if (value instanceof String) {
-      appendTypedString(json, "string", (String) value);
-      return;
+      return typed("string", value);
     }
-
+    if (value instanceof Class<?>) {
+      return classToken((Class<?>) value, arena.add(value));
+    }
     if (value instanceof byte[]) {
-      appendBytes(json, binary, (byte[]) value);
-      return;
+      return bytes((byte[]) value);
     }
-
     if (value instanceof ByteBuffer) {
-      appendBytes(json, binary, copyRemaining((ByteBuffer) value));
-      return;
+      return bytes(copyRemaining((ByteBuffer) value));
     }
-
     if (value instanceof char[]) {
-      appendTypedString(json, "char[]", new String((char[]) value));
-      return;
+      return typed("char[]", new String((char[]) value));
     }
 
     String arrayType = primitiveArrayType(value);
     if (arrayType != null) {
-      appendPrimitiveArray(json, arrayType, value);
-      return;
+      return primitiveArray(arrayType, value);
     }
 
-    throw new IllegalArgumentException(
-        "unsupported Java APE host value: " + value.getClass().getName());
+    return javaReference(value, arena);
   }
 
-  static Object decodeResponseValue(Map<String, Object> descriptor, byte[] binary) {
-    String type = requireString(descriptor.get("type"), "host return type is missing");
+  static Object decodeResponseValue(Map<String, Object> descriptor, byte[] ignoredBinary) {
+    String type = requireString(descriptor.get("type"), "host value type is missing");
     Object value = descriptor.get("value");
 
     switch (type) {
@@ -113,7 +92,7 @@ final class HostValueCodec {
       case "string":
         return stringOrDefault(value, "");
       case "bytes":
-        return decodeBytes(descriptor, binary);
+        return decodeBytes(descriptor);
       case "boolean[]":
         return decodeBooleanArray(value);
       case "short[]":
@@ -129,7 +108,7 @@ final class HostValueCodec {
       case "double[]":
         return decodeDoubleArray(value);
       default:
-        throw new HostServices.HostProtocolException("unsupported host return type " + type);
+        throw new HostServices.HostProtocolException("unsupported host value type " + type);
     }
   }
 
@@ -139,62 +118,85 @@ final class HostValueCodec {
     }
 
     @SuppressWarnings("unchecked")
-    Map<String, Object> map = (Map<String, Object>) value;
-    return map;
+    Map<String, Object> result = (Map<String, Object>) value;
+    return result;
   }
 
-  static void appendString(StringBuilder output, String value) {
-    output.append('"');
-
-    for (int index = 0; index < value.length(); ++index) {
-      appendEscapedCharacter(output, value.charAt(index));
+  static List<Object> requireList(Object value) {
+    if (!(value instanceof List)) {
+      throw new HostServices.HostProtocolException("host array value is not an array");
     }
 
-    output.append('"');
+    @SuppressWarnings("unchecked")
+    List<Object> result = (List<Object>) value;
+    return result;
   }
 
-  private static void appendBoolean(StringBuilder json, Boolean value) {
-    json.append("{\"type\":\"boolean\",\"value\":").append(value).append('}');
+  static Number requireNumber(Object value, String type) {
+    if (!(value instanceof Number)) {
+      throw new HostServices.HostProtocolException("invalid numeric " + type + " value");
+    }
+    return (Number) value;
   }
 
-  private static void appendNumber(StringBuilder json, String type, Object value) {
-    json.append("{\"type\":\"").append(type).append("\",\"value\":")
-        .append(value).append('}');
+  static int requireInteger(Object value, String type) {
+    Number number = requireNumber(value, type);
+    long integer = number.longValue();
+    if (number.doubleValue() != integer || integer < Integer.MIN_VALUE || integer > Integer.MAX_VALUE) {
+      throw new HostServices.HostProtocolException("invalid integer " + type);
+    }
+    return (int) integer;
   }
 
-  private static void appendCharacter(StringBuilder json, Character value) {
-    json.append("{\"type\":\"char\",\"value\":");
-    appendString(json, value.toString());
-    json.append('}');
+  private static Map<String, Object> typed(String type, Object value) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("type", type);
+    if (value != null) {
+      result.put("value", value);
+    }
+    return result;
   }
 
-  private static void appendTypedString(StringBuilder json, String type, String value) {
-    json.append("{\"type\":\"").append(type).append("\",\"value\":");
-    appendString(json, value);
-    json.append('}');
-  }
-
-  private static void appendFiniteNumber(StringBuilder json, String type, double value) {
+  private static Map<String, Object> finite(String type, double value) {
     if (!Double.isFinite(value)) {
       throw new IllegalArgumentException("non-finite " + type + " value");
     }
-
-    json.append("{\"type\":\"").append(type).append("\",\"value\":")
-        .append(value).append('}');
+    return typed(type, value);
   }
 
-  private static void appendBytes(StringBuilder json, ByteArrayOutputStream binary, byte[] bytes) {
-    int offset = binary.size();
-    binary.write(bytes, 0, bytes.length);
-    json.append("{\"type\":\"bytes\",\"offset\":").append(offset)
-        .append(",\"length\":").append(bytes.length).append('}');
+  private static Map<String, Object> classToken(Class<?> type, long reference) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("type", "class");
+    result.put("descriptor", descriptor(type));
+    result.put("name", type.getTypeName());
+    Module module = type.getModule();
+    result.put("module", module == null ? null : module.getName());
+    result.put("loader", loaderKind(type));
+    result.put("loaderId", loaderId(type));
+    result.put("ref", reference);
+    return result;
+  }
+
+  private static Map<String, Object> javaReference(Object value, HostReferenceArena arena) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("type", "java-ref");
+    result.put("id", arena.add(value));
+    result.put("class", classToken(value.getClass(), arena.add(value.getClass())));
+    return result;
+  }
+
+  private static Map<String, Object> bytes(byte[] value) {
+    Map<String, Object> result = new LinkedHashMap<>();
+    result.put("type", "bytes");
+    result.put("encoding", "base64");
+    result.put("data", Base64.getEncoder().encodeToString(value));
+    return result;
   }
 
   private static byte[] copyRemaining(ByteBuffer source) {
     ByteBuffer copy = source.duplicate();
     byte[] bytes = new byte[copy.remaining()];
     copy.get(bytes);
-
     return bytes;
   }
 
@@ -202,220 +204,189 @@ final class HostValueCodec {
     if (value instanceof boolean[]) {
       return "boolean[]";
     }
-
     if (value instanceof short[]) {
       return "short[]";
     }
-
     if (value instanceof int[]) {
       return "int[]";
     }
-
     if (value instanceof long[]) {
       return "long[]";
     }
-
     if (value instanceof float[]) {
       return "float[]";
     }
-
     if (value instanceof double[]) {
       return "double[]";
     }
-
     return null;
   }
 
-  private static void appendPrimitiveArray(StringBuilder json, String type, Object values) {
-    json.append("{\"type\":\"").append(type).append("\",\"value\":[");
-
+  private static Map<String, Object> primitiveArray(String type, Object values) {
+    List<Object> result = new ArrayList<>();
     int length = Array.getLength(values);
     for (int index = 0; index < length; ++index) {
-      if (index != 0) {
-        json.append(',');
-      }
-
       Object value = Array.get(values, index);
-      appendArrayElement(json, type, value);
-    }
-
-    json.append("]}");
-  }
-
-  private static void appendArrayElement(StringBuilder json, String type, Object value) {
-    if (value instanceof Float || value instanceof Double) {
-      double number = ((Number) value).doubleValue();
-      if (!Double.isFinite(number)) {
+      if (value instanceof Float && !Float.isFinite((Float) value)) {
         throw new IllegalArgumentException("non-finite " + type + " value");
       }
+      if (value instanceof Double && !Double.isFinite((Double) value)) {
+        throw new IllegalArgumentException("non-finite " + type + " value");
+      }
+      result.add(value);
     }
-
-    json.append(value);
+    return typed(type, result);
   }
 
-  private static void appendEscapedCharacter(StringBuilder output, char value) {
-    switch (value) {
-      case '"':
-        output.append("\\\"");
-        return;
-      case '\\':
-        output.append("\\\\");
-        return;
-      case '\b':
-        output.append("\\b");
-        return;
-      case '\f':
-        output.append("\\f");
-        return;
-      case '\n':
-        output.append("\\n");
-        return;
-      case '\r':
-        output.append("\\r");
-        return;
-      case '\t':
-        output.append("\\t");
-        return;
-      default:
-        appendUnescapedCharacter(output, value);
+  private static String descriptor(Class<?> type) {
+    if (type.isArray()) {
+      return type.getName().replace('.', '/');
     }
+    if (!type.isPrimitive()) {
+      return "L" + type.getName().replace('.', '/') + ";";
+    }
+    if (type == void.class) {
+      return "V";
+    }
+    if (type == boolean.class) {
+      return "Z";
+    }
+    if (type == byte.class) {
+      return "B";
+    }
+    if (type == char.class) {
+      return "C";
+    }
+    if (type == short.class) {
+      return "S";
+    }
+    if (type == int.class) {
+      return "I";
+    }
+    if (type == long.class) {
+      return "J";
+    }
+    if (type == float.class) {
+      return "F";
+    }
+    if (type == double.class) {
+      return "D";
+    }
+    throw new IllegalArgumentException("unknown primitive class " + type.getName());
   }
 
-  private static void appendUnescapedCharacter(StringBuilder output, char value) {
-    if (value < 0x20) {
-      output.append(String.format("\\u%04x", (int) value));
-      return;
+  private static String loaderKind(Class<?> type) {
+    ClassLoader loader = type.getClassLoader();
+    if (loader == null) {
+      return "bootstrap";
     }
-
-    output.append(value);
+    if (loader == ClassLoader.getPlatformClassLoader()) {
+      return "platform";
+    }
+    if (loader == ClassLoader.getSystemClassLoader()) {
+      return "application";
+    }
+    return "custom";
   }
 
-  private static char decodeCharacter(Object value) {
-    String character = requireString(value, "invalid char return");
-    if (character.length() != 1) {
-      throw new HostServices.HostProtocolException("invalid char return");
-    }
-
-    return character.charAt(0);
-  }
-
-  private static byte[] decodeBytes(Map<String, Object> descriptor, byte[] binary) {
-    int offset = requireNumber(descriptor.get("offset"), "offset").intValue();
-    int length = requireNumber(descriptor.get("length"), "length").intValue();
-    if (offset < 0 || length < 0 || offset > binary.length - length) {
-      throw new HostServices.HostProtocolException("invalid binary return range");
-    }
-
-    byte[] bytes = new byte[length];
-    System.arraycopy(binary, offset, bytes, 0, length);
-    return bytes;
-  }
-
-  private static boolean[] decodeBooleanArray(Object value) {
-    List<Object> values = requireList(value);
-    boolean[] result = new boolean[values.size()];
-
-    for (int index = 0; index < result.length; ++index) {
-      result[index] = requireBoolean(values.get(index), "boolean[]");
-    }
-
-    return result;
-  }
-
-  private static short[] decodeShortArray(Object value) {
-    List<Object> values = requireList(value);
-    short[] result = new short[values.size()];
-
-    for (int index = 0; index < result.length; ++index) {
-      result[index] = requireNumber(values.get(index), "short[]").shortValue();
-    }
-
-    return result;
-  }
-
-  private static int[] decodeIntArray(Object value) {
-    List<Object> values = requireList(value);
-    int[] result = new int[values.size()];
-
-    for (int index = 0; index < result.length; ++index) {
-      result[index] = requireNumber(values.get(index), "int[]").intValue();
-    }
-
-    return result;
-  }
-
-  private static long[] decodeLongArray(Object value) {
-    List<Object> values = requireList(value);
-    long[] result = new long[values.size()];
-
-    for (int index = 0; index < result.length; ++index) {
-      result[index] = requireNumber(values.get(index), "long[]").longValue();
-    }
-
-    return result;
-  }
-
-  private static float[] decodeFloatArray(Object value) {
-    List<Object> values = requireList(value);
-    float[] result = new float[values.size()];
-
-    for (int index = 0; index < result.length; ++index) {
-      result[index] = requireNumber(values.get(index), "float[]").floatValue();
-    }
-
-    return result;
-  }
-
-  private static double[] decodeDoubleArray(Object value) {
-    List<Object> values = requireList(value);
-    double[] result = new double[values.size()];
-
-    for (int index = 0; index < result.length; ++index) {
-      result[index] = requireNumber(values.get(index), "double[]").doubleValue();
-    }
-
-    return result;
+  private static long loaderId(Class<?> type) {
+    ClassLoader loader = type.getClassLoader();
+    return loader == null ? 0 : Integer.toUnsignedLong(System.identityHashCode(loader));
   }
 
   private static Boolean requireBoolean(Object value, String type) {
     if (!(value instanceof Boolean)) {
-      throw new HostServices.HostProtocolException("invalid " + type + " return");
+      throw new HostServices.HostProtocolException("invalid " + type + " value");
     }
-
     return (Boolean) value;
-  }
-
-  private static Number requireNumber(Object value, String type) {
-    if (!(value instanceof Number)) {
-      throw new HostServices.HostProtocolException("invalid numeric " + type + " return");
-    }
-
-    return (Number) value;
   }
 
   private static String requireString(Object value, String message) {
     if (!(value instanceof String)) {
       throw new HostServices.HostProtocolException(message);
     }
-
     return (String) value;
   }
 
   private static String stringOrDefault(Object value, String fallback) {
-    if (value instanceof String) {
-      return (String) value;
+    if (value == null) {
+      return fallback;
     }
-
-    return fallback;
+    return requireString(value, "invalid string value");
   }
 
-  private static List<Object> requireList(Object value) {
-    if (!(value instanceof List)) {
-      throw new HostServices.HostProtocolException("array return is not an array");
+  private static char decodeCharacter(Object value) {
+    String character = requireString(value, "invalid char value");
+    if (character.length() != 1) {
+      throw new HostServices.HostProtocolException("invalid char value");
     }
+    return character.charAt(0);
+  }
 
-    @SuppressWarnings("unchecked")
-    List<Object> list = (List<Object>) value;
-    return list;
+  private static byte[] decodeBytes(Map<String, Object> descriptor) {
+    String encoding = requireString(descriptor.get("encoding"), "missing bytes encoding");
+    String data = requireString(descriptor.get("data"), "missing base64 bytes");
+    if (!"base64".equals(encoding)) {
+      throw new HostServices.HostProtocolException("unsupported bytes encoding " + encoding);
+    }
+    try {
+      return Base64.getDecoder().decode(data);
+    } catch (IllegalArgumentException error) {
+      throw new HostServices.HostProtocolException("invalid base64 bytes", error);
+    }
+  }
+
+  private static boolean[] decodeBooleanArray(Object value) {
+    List<Object> values = requireList(value);
+    boolean[] result = new boolean[values.size()];
+    for (int index = 0; index < result.length; ++index) {
+      result[index] = requireBoolean(values.get(index), "boolean[]");
+    }
+    return result;
+  }
+
+  private static short[] decodeShortArray(Object value) {
+    List<Object> values = requireList(value);
+    short[] result = new short[values.size()];
+    for (int index = 0; index < result.length; ++index) {
+      result[index] = requireNumber(values.get(index), "short[]").shortValue();
+    }
+    return result;
+  }
+
+  private static int[] decodeIntArray(Object value) {
+    List<Object> values = requireList(value);
+    int[] result = new int[values.size()];
+    for (int index = 0; index < result.length; ++index) {
+      result[index] = requireNumber(values.get(index), "int[]").intValue();
+    }
+    return result;
+  }
+
+  private static long[] decodeLongArray(Object value) {
+    List<Object> values = requireList(value);
+    long[] result = new long[values.size()];
+    for (int index = 0; index < result.length; ++index) {
+      result[index] = requireNumber(values.get(index), "long[]").longValue();
+    }
+    return result;
+  }
+
+  private static float[] decodeFloatArray(Object value) {
+    List<Object> values = requireList(value);
+    float[] result = new float[values.size()];
+    for (int index = 0; index < result.length; ++index) {
+      result[index] = requireNumber(values.get(index), "float[]").floatValue();
+    }
+    return result;
+  }
+
+  private static double[] decodeDoubleArray(Object value) {
+    List<Object> values = requireList(value);
+    double[] result = new double[values.size()];
+    for (int index = 0; index < result.length; ++index) {
+      result[index] = requireNumber(values.get(index), "double[]").doubleValue();
+    }
+    return result;
   }
 }

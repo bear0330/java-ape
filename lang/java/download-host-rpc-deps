@@ -1,0 +1,35 @@
+#!/bin/sh
+# Fetches the pinned runtime dependencies for the boot-loadable Host Services JAR.
+set -eu
+
+: "${BASELOC:?BASELOC is required}"
+OUT="$BASELOC/distfiles"
+CHECKSUMS="$BASELOC/lang/java/host-rpc-deps.sha256"
+
+fetch() {
+  name=$1
+  url=$2
+  target="$OUT/$name"
+  if [ -f "$target" ]; then
+    return
+  fi
+
+  tmp="$target.tmp.$$"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fL --retry 3 -o "$tmp" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -O "$tmp" "$url"
+  else
+    echo "missing curl or wget for Host Services dependencies" >&2
+    exit 1
+  fi
+  mv "$tmp" "$target"
+}
+
+mkdir -p "$OUT"
+fetch org.eclipse.lsp4j.jsonrpc-1.0.0.jar \
+  https://repo1.maven.org/maven2/org/eclipse/lsp4j/org.eclipse.lsp4j.jsonrpc/1.0.0/org.eclipse.lsp4j.jsonrpc-1.0.0.jar
+fetch gson-2.13.2.jar \
+  https://repo1.maven.org/maven2/com/google/code/gson/gson/2.13.2/gson-2.13.2.jar
+
+(cd "$OUT" && sha256sum -c "$CHECKSUMS")

@@ -10,12 +10,20 @@ dependency, build, installation, packaging, module-repository scripts, and
 runtime tests. Superconfigure supplies the common framework and Cosmopolitan
 toolchain.
 
+> **Disclosure and project status.** Most of this experimental project was
+> produced with substantial AI assistance. The author defined its boundaries,
+> integration approach, and the design questions behind Host Services. It has
+> been tested on Windows x64, WSL, Linux x86_64, Linux arm64, and macOS arm64,
+> but not across every platform supported by APE. It is not necessarily
+> production-ready; anyone interested in long-term, production-quality
+> maintenance is welcome to adopt it.
+
 ## Install the overlay
 
-[`superconfigure.lock`](superconfigure.lock) pins the public superconfigure
-HEAD validated with this overlay. With no argument, the installer clones that base to
-`./superconfigure/`, installs this project's complete `lang/java` recipe, and
-adds its parent-catalog entry:
+[`superconfigure.lock`](superconfigure.lock) pins the released superconfigure
+base validated with this overlay: `z0.0.66`. With no argument, the installer
+clones that base to `./superconfigure/`, installs this project's complete
+`lang/java` recipe, and adds its parent-catalog entry:
 
 ```sh
 ./scripts/install-overlay.sh
@@ -79,32 +87,34 @@ not embedded in the minimal runtime.
 ## Native methods and Host Services
 
 `java.com` first uses ordinary JNI resolution. If a native symbol is not
-present and both Host Services variables are set, it can instead call a local
-provider that supplies the Java-visible behaviour of that native method. The
-provider replaces the implementation; it does not emulate the original shared
-library's JNI internals.
+present and Host Services is configured, it can instead call a local provider
+that supplies the Java-visible behaviour of that native method. The provider
+replaces the implementation; it does not emulate the original shared library's
+JNI internals.
 
 ```mermaid
 flowchart TD
     A[Java code calls a native method] --> B{Ordinary JNI symbol found?}
     B -->|yes| C[Run the linked JNI implementation]
-    B -->|no| D{JAVA_APE_HOST and token configured?}
+    B -->|no| D{APE_HOST and token configured?}
     D -->|no| E[UnsatisfiedLinkError]
-    D -->|yes| F[POST exact method identity and values to Host]
+    D -->|yes| F[JSON-RPC native invocation over persistent TCP]
     F --> G[Provider implements Java-visible behaviour]
     G --> H[Return value or structured error]
 
-    I[System.loadLibrary name] --> J{Name listed in JAVA_APE_VIRTUAL_LIBRARIES?}
-    J -->|no| K[Normal shared-library loading]
-    J -->|yes| L[Treat name as loaded; export no JNI symbols]
-    L --> B
+    I[System.loadLibrary name] --> J{Normal shared-library loading succeeds?}
+    J -->|yes| K[Use normal native library]
+    J -->|no| L{Name exactly in APE_VIRTUAL_LIBRARIES?}
+    L -->|no| M[Normal load failure]
+    L -->|yes| N[Treat name as loaded; export no JNI symbols]
+    N --> B
 ```
 
 Enable a local provider explicitly:
 
 ```sh
-export JAVA_APE_HOST=http://127.0.0.1:49321
-export JAVA_APE_HOST_TOKEN='replace-with-a-random-secret'
+export APE_HOST=127.0.0.1:49321
+export APE_HOST_TOKEN='replace-with-a-random-secret'
 ./results/bin/java.com -jar app.jar
 ```
 
@@ -113,7 +123,7 @@ method. If a provider deliberately replaces such a library, list only its
 exact name:
 
 ```sh
-export JAVA_APE_VIRTUAL_LIBRARIES=awt,fontmanager
+export APE_VIRTUAL_LIBRARIES=awt,fontmanager
 ./results/bin/java.com -jar app.jar
 ```
 
@@ -123,12 +133,14 @@ such as `java.awt.image.ColorModel.initIDs()V`. A provider may return success
 for an initialization method when its replacement implementation has no need
 for the original library's private JNI caches.
 
-The v1 protocol is HTTP with a JSON control header and optional raw binary
-payload. It supports primitive values, strings, primitive arrays, `byte[]`,
-and copied `ByteBuffer` data. It intentionally does not transport arbitrary
-Java object references, callbacks, or remote JNI state. See
+The v1 protocol is JSON-RPC 2.0 over one persistent loopback TCP connection,
+with LSP-style `Content-Length` framing. Java uses the mature Eclipse LSP4J
+JSON-RPC implementation; Gson transports the typed value maps. It supports
+primitive values, strings, primitive arrays, base64 `byte[]`, class tokens,
+and request-scoped Java references. While a native invocation is pending, the
+provider may issue an ordered `java.env.execute` request back to Java. See
 [`docs/java-host-services.md`](docs/java-host-services.md) for the exact wire
-format, response errors, and the boot-loaded Level 2 shim API.
+format, value ABI, errors, and boot-loaded shim API.
 
 For an end-to-end provider example, see
 [`bear0330/tika-ape`](https://github.com/bear0330/tika-ape), which packages
@@ -151,8 +163,9 @@ to contain all 69 modules, including `java.desktop` and `java.datatransfer`.
 
 Host Services has a separate localhost protocol smoke test. It exercises
 disabled-by-default lookup, exact virtual-library names, interpreter and
-compiled native call paths, binary values, primitive arrays, the Level 2 shim,
-and structured authentication errors:
+compiled native call paths, base64 values, primitive-array mutation, scoped
+Java references, bidirectional Java-environment calls, and authentication
+errors:
 
 ```sh
 BASELOC=/path/to/superconfigure \
@@ -164,16 +177,3 @@ BASELOC=/path/to/superconfigure \
 This project is licensed under GPL-2.0-only.
 OpenJDK-derived files retain their upstream copyright and licensing terms, 
 including the Classpath Exception where upstream designates it.
-
-## Disclosure and project status
-
-Most of this experimental project was produced with substantial AI assistance.
-The author defined the project boundaries, integration approach, and design
-questions, including the Host Services backend for Java native methods.
-
-It has been tested on Windows x64, WSL, Linux x86_64, Linux arm64, and macOS
-arm64. This is not complete validation across every platform supported by APE.
-
-This project is primarily experimental and may not be production-ready. Anyone
-interested in taking on long-term, production-quality maintenance is welcome
-to adopt and maintain it.

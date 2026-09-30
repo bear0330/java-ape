@@ -1,115 +1,46 @@
 package com.nuwainfo.javaape;
 
-import java.io.ByteArrayInputStream;
-import java.io.DataInputStream;
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.util.Map;
 
+/** Decodes a successful JSON-RPC result from a Host Services provider. */
 final class HostResponse {
-  private static final int MAX_HEADER_BYTES = 1024 * 1024;
-
-  private final Map<String, Object> header;
-  private final byte[] binary;
-
-  private HostResponse(Map<String, Object> header, byte[] binary) {
-    this.header = header;
-    this.binary = binary;
+  private HostResponse() {
   }
 
-  static HostResponse parse(byte[] wire) {
-    if (wire.length < 4) {
-      throw new HostServices.HostProtocolException("host response has no header");
-    }
-
-    try (DataInputStream input = new DataInputStream(new ByteArrayInputStream(wire))) {
-      int headerLength = input.readInt();
-      validateHeaderLength(headerLength, wire.length);
-
-      byte[] headerBytes = new byte[headerLength];
-      input.readFully(headerBytes);
-
-      Object parsed = HostJson.parse(new String(headerBytes, StandardCharsets.UTF_8));
-      Map<String, Object> header = HostValueCodec.requireMap(
-          parsed, "host response header is not an object");
-
-      return new HostResponse(header, input.readAllBytes());
-    } catch (IOException error) {
-      throw new HostServices.HostProtocolException("cannot parse host response", error);
-    }
-  }
-
-  Object value() {
-    throwIfError();
-
-    Object descriptor = header.get("return");
-    if (descriptor == null) {
-      return null;
-    }
-
+  static HostInvocation invocation(Object encoded, HostReferenceArena arena) {
     Map<String, Object> result = HostValueCodec.requireMap(
-        descriptor, "host return descriptor is not an object");
-    return HostValueCodec.decodeResponseValue(result, binary);
+        encoded, "host JSON-RPC result is not an object");
+    Object descriptor = result.get("return");
+    Object returnValue = null;
+
+    if (descriptor != null) {
+      Map<String, Object> value = HostValueCodec.requireMap(
+          descriptor, "host return descriptor is not an object");
+      returnValue = HostValueCodec.decodeResponseValue(value, new byte[0]);
+    }
+
+    return new HostInvocation(
+        returnValue,
+        HostMutation.decode(result.get("mutations"), new byte[0]),
+        exception(result.get("exception"), arena));
   }
 
-  void throwIfError() {
-    if (Boolean.TRUE.equals(header.get("ok"))) {
-      return;
-    }
-
-    Map<String, Object> error = errorDescriptor();
-    String type = errorType(error);
-    String message = errorMessage(error);
-
-    if ("unsupported".equals(type)) {
-      throw new UnsupportedOperationException(message);
-    }
-
-    if ("unauthorized".equals(type)) {
-      throw new SecurityException(message);
-    }
-
-    throw new HostServices.HostProtocolException(type + ": " + message);
-  }
-
-  private static void validateHeaderLength(int length, int wireLength) {
-    if (length < 2 || length > MAX_HEADER_BYTES || length > wireLength - 4) {
-      throw new HostServices.HostProtocolException("invalid host response header length");
-    }
-  }
-
-  private Map<String, Object> errorDescriptor() {
-    Object value = header.get("error");
-    if (!(value instanceof Map)) {
+  private static Throwable exception(Object encoded, HostReferenceArena arena) {
+    if (encoded == null) {
       return null;
     }
 
-    return HostValueCodec.requireMap(value, "host error descriptor is not an object");
+    Map<String, Object> descriptor = HostValueCodec.requireMap(
+        encoded, "host exception descriptor is not an object");
+    long reference = HostValueCodec.requireInteger(
+        descriptor.get("ref"), "host exception reference");
+    Object value = arena.require(reference);
+
+    if (!(value instanceof Throwable)) {
+      throw new HostServices.HostProtocolException("host exception reference is not a Throwable");
+    }
+
+    return (Throwable) value;
   }
 
-  private static String errorType(Map<String, Object> error) {
-    if (error == null) {
-      return "host";
-    }
-
-    Object value = error.get("type");
-    if (value instanceof String) {
-      return (String) value;
-    }
-
-    return "host";
-  }
-
-  private static String errorMessage(Map<String, Object> error) {
-    if (error == null) {
-      return "host request failed";
-    }
-
-    Object value = error.get("message");
-    if (value instanceof String) {
-      return (String) value;
-    }
-
-    return "host request failed";
-  }
 }

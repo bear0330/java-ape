@@ -42,6 +42,8 @@ mkdir -p "$STAGE/lang" "$STAGE/docs" "$STAGE/tests"
 cp -pR "$SOURCE/lang/java" "$STAGE/lang/java"
 cp -p "$SOURCE/docs/java-host-services.md" "$STAGE/docs/java-host-services.md"
 cp -pR "$SOURCE/tests/java" "$STAGE/tests/java"
+find "$STAGE/tests/java" -type f \( -name '*.pyc' -o -name '*.pyo' \) -delete
+find "$STAGE/tests/java" -type d -name __pycache__ -empty -delete
 
 sync_path() {
   relative=$1

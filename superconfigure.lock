@@ -1,7 +1,7 @@
-# The public superconfigure HEAD verified with this overlay.
+# The released base framework on which this overlay is applied.
 superconfigure_repository=https://github.com/ahgamut/superconfigure.git
-superconfigure_ref=main
-superconfigure_commit=3afd6061e0c72d2e0e83a280c857e4459f3a0635
+superconfigure_ref=z0.0.66
+superconfigure_commit=29009f53a141be8113e7f5729a0a007f1081df58
 target=lang/java
 artifacts=results/bin/java.com,results/libexec/java-modules.zip
 openjdk_source=jdk25u-jdk-25.0.4-ga.tar.gz

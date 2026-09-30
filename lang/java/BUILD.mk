@@ -4,7 +4,7 @@
 
 JAVA_SRC := $(BASELOC)/distfiles/jdk25u-jdk-25.0.4-ga.tar.gz
 JAVA_URL := https://github.com/openjdk/jdk25u/archive/refs/tags/jdk-25.0.4-ga.tar.gz
-JAVA_HOST_SHIM := $(BASELOC)/lang/java/host-shim/src/main/java/com/nuwainfo/javaape/HostServices.java
+JAVA_HOST_SHIM_SOURCES := $(wildcard $(BASELOC)/lang/java/host-shim/src/main/java/com/nuwainfo/javaape/*.java)
 
 $(eval $(call DOWNLOAD_SOURCE,lang/java,$(JAVA_SRC)))
 
@@ -31,13 +31,13 @@ o/lang/java/deps.x86_64: DEPS_COMMAND = $(BASELOC)/lang/java/deps-wrapper
 o/lang/java/configured.x86_64: CONFIG_COMMAND = $(BASELOC)/lang/java/config-wrapper
 o/lang/java/built.x86_64: BUILD_COMMAND = $(BASELOC)/lang/java/build-wrapper
 o/lang/java/installed.x86_64: INSTALL_COMMAND = $(BASELOC)/lang/java/install-wrapper
-o/lang/java/installed.x86_64: $(BASELOC)/lang/java/pack-jre $(BASELOC)/lang/java/build-host-shim $(JAVA_HOST_SHIM)
+o/lang/java/installed.x86_64: $(BASELOC)/lang/java/pack-jre $(BASELOC)/lang/java/build-host-shim $(BASELOC)/lang/java/download-host-rpc-deps $(BASELOC)/lang/java/host-rpc-deps.sha256 $(JAVA_HOST_SHIM_SOURCES)
 
 o/lang/java/deps.aarch64: DEPS_COMMAND = $(BASELOC)/lang/java/deps-wrapper
 o/lang/java/configured.aarch64: CONFIG_COMMAND = $(BASELOC)/lang/java/config-wrapper
 o/lang/java/built.aarch64: BUILD_COMMAND = $(BASELOC)/lang/java/build-wrapper
 o/lang/java/installed.aarch64: INSTALL_COMMAND = $(BASELOC)/lang/java/install-wrapper
-o/lang/java/installed.aarch64: $(BASELOC)/lang/java/pack-jre $(BASELOC)/lang/java/build-host-shim $(JAVA_HOST_SHIM)
+o/lang/java/installed.aarch64: $(BASELOC)/lang/java/pack-jre $(BASELOC)/lang/java/build-host-shim $(BASELOC)/lang/java/download-host-rpc-deps $(BASELOC)/lang/java/host-rpc-deps.sha256 $(JAVA_HOST_SHIM_SOURCES)
 
 # OpenJDK regenerates one source-tree configure script.  Do not let the two
 # architecture rules regenerate it concurrently under make -j.

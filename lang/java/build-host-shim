@@ -7,6 +7,7 @@ set -eu
 OUT=${1:?output JAR is required}
 SRC="$BASELOC/lang/java/host-shim/src/main/java"
 BOOT=${BOOT_JDK:-$BASELOC/build-tools/openjdk25-boot}
+DEPS="$BASELOC/distfiles"
 
 if [ ! -x "$BOOT/bin/javac" ]; then
   if command -v javac >/dev/null 2>&1 && command -v jar >/dev/null 2>&1; then
@@ -22,9 +23,15 @@ else
 fi
 
 test -d "$SRC" || { echo "missing host shim sources: $SRC" >&2; exit 1; }
+BASELOC="$BASELOC" "$BASELOC/lang/java/download-host-rpc-deps"
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/java-ape-host.XXXXXX")
 trap 'rm -rf "$WORK"' EXIT HUP INT TERM
 mkdir -p "$(dirname "$OUT")"
 
-find "$SRC" -name '*.java' -print0 | xargs -0 "$JAVAC" --release 17 -d "$WORK/classes"
+mkdir -p "$WORK/classes"
+find "$SRC" -name '*.java' -print0 | xargs -0 "$JAVAC" --release 17 \
+  -cp "$DEPS/org.eclipse.lsp4j.jsonrpc-1.0.0.jar:$DEPS/gson-2.13.2.jar" -d "$WORK/classes"
+unzip -qo "$DEPS/org.eclipse.lsp4j.jsonrpc-1.0.0.jar" -d "$WORK/classes"
+unzip -qo "$DEPS/gson-2.13.2.jar" -d "$WORK/classes"
+find "$WORK/classes/META-INF" -type f \( -name '*.SF' -o -name '*.RSA' \) -delete
 "$JAR" --create --file "$OUT" -C "$WORK/classes" .

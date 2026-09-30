@@ -2595,7 +2595,7 @@
  #if INCLUDE_JFR
  #include "jfr/jfr.hpp"
  #endif
-@@ -249,6 +255,199 @@
+@@ -249,6 +255,205 @@
    return nullptr;
  }
  
@@ -2605,8 +2605,8 @@
 +// jvalue array, so these fixed C signatures never depend on a JNI method ABI.
 +static bool java_ape_host_enabled() {
 +#ifdef __COSMOPOLITAN__
-+  const char* host = ::getenv("JAVA_APE_HOST");
-+  const char* token = ::getenv("JAVA_APE_HOST_TOKEN");
++  const char* host = ::getenv("APE_HOST");
++  const char* token = ::getenv("APE_HOST_TOKEN");
 +  return host != nullptr && *host != '\0' && token != nullptr && *token != '\0';
 +#else
 +  return false;
@@ -2661,6 +2661,11 @@
 +  JavaThread* thread = JavaThread::current();
 +  frame caller = thread->last_frame();
 +  jvalue* values = NEW_RESOURCE_ARRAY(jvalue, method->size_of_parameters());
++  if (!method->is_static()) {
++    intptr_t* slot = caller.interpreter_frame_local_at(0);
++    oop receiver = *(oop*)slot;
++    values[0].l = receiver == nullptr ? nullptr : JNIHandles::make_local(receiver);
++  }
 +  int index = method->is_static() ? 0 : 1;
 +  for (SignatureStream ss(method->signature()); !ss.at_return_type(); ss.next(), ++index) {
 +    intptr_t* slot = caller.interpreter_frame_local_at(
@@ -2694,7 +2699,7 @@
 +  jclass host = env->FindClass("com/nuwainfo/javaape/HostServices");
 +  if (host == nullptr) return nullptr;
 +  jmethodID call = env->GetStaticMethodID(host, "callNative",
-+      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;[Ljava/lang/Object;)Ljava/lang/Object;");
++      "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/Object;[Ljava/lang/Object;)Ljava/lang/Object;");
 +  if (call == nullptr) return nullptr;
 +  jclass object = env->FindClass("java/lang/Object");
 +  if (object == nullptr) return nullptr;
@@ -2715,7 +2720,8 @@
 +  jstring name = env->NewStringUTF(method->name()->as_C_string());
 +  jstring descriptor = env->NewStringUTF(method->signature()->as_C_string());
 +  if (owner == nullptr || name == nullptr || descriptor == nullptr) return nullptr;
-+  return env->CallStaticObjectMethod(host, call, owner, name, descriptor, args);
++  jobject target = method->is_static() ? nullptr : values[0].l;
++  return env->CallStaticObjectMethod(host, call, owner, name, descriptor, target, args);
 +}
 +
 +static jboolean JNICALL java_ape_host_boolean(JNIEnv* env, jobject, Method*, jvalue* values) {
@@ -3174,26 +3180,18 @@
              // JLI_SetTraceLauncher is not called yet
 --- jdk25u-jdk-25.0.4-ga/src/java.base/share/classes/jdk/internal/loader/NativeLibraries.java
 +++ jdk25u-jdk-25.0.4-ga/src/java.base/share/classes/jdk/internal/loader/NativeLibraries.java
-@@ -236,6 +236,13 @@
-     public NativeLibrary loadLibrary(Class<?> fromClass, String name) {
-         assert name.indexOf(File.separatorChar) < 0;
- 
-+        // A Java APE host binding can explicitly declare a library virtual.
-+        // This deliberately bypasses only dlopen; unresolved native methods
-+        // still follow normal JNI lookup before the Host Services fallback.
-+        if (isVirtualLibrary(name)) {
-+            return new VirtualNativeLibrary(name);
-+        }
-+
-         NativeLibrary lib = findFromPaths(LibraryPaths.SYS_PATHS, fromClass, name);
+@@ -240,9 +240,25 @@
          if (lib == null && searchJavaLibraryPath) {
              lib = findFromPaths(LibraryPaths.USER_PATHS, fromClass, name);
-@@ -243,6 +250,19 @@
+         }
++        if (lib == null && isVirtualLibrary(name)) {
++            return new VirtualNativeLibrary(name);
++        }
          return lib;
      }
  
 +    private static boolean isVirtualLibrary(String name) {
-+        String configured = System.getenv("JAVA_APE_VIRTUAL_LIBRARIES");
++        String configured = System.getenv("APE_VIRTUAL_LIBRARIES");
 +        if (configured == null || configured.isEmpty()) {
 +            return false;
 +        }
@@ -3208,12 +3206,12 @@
      private NativeLibrary findFromPaths(String[] paths, Class<?> fromClass, String name) {
          for (String path : paths) {
              File libfile = new File(path, System.mapLibraryName(name));
-@@ -338,6 +358,26 @@
-         }
+@@ -261,6 +277,26 @@
+         return null;
      }
  
-+    // A virtual library intentionally exports no JNI symbols. It merely lets
-+    // explicitly opted-in Java code reach descriptor-aware native resolution.
++    // A virtual library is used only after normal loading failed. It exports
++    // no JNI symbols, so native resolution can continue to Host Services.
 +    private static final class VirtualNativeLibrary extends NativeLibrary {
 +        private final String name;
 +
@@ -3232,6 +3230,6 @@
 +        }
 +    }
 +
-     /*
+     /**
       * The run() method will be invoked when this class loader becomes
       * phantom reachable to unload the native library.

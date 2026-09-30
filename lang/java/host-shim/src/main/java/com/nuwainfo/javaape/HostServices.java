@@ -3,8 +3,8 @@ package com.nuwainfo.javaape;
 /**
  * Public value-oriented bridge from Java APE to an explicitly configured host.
  *
- * <p>The bridge transports only protocol values. It is not remote JNI and does
- * not expose remote object references, callbacks, or class loading.
+ * <p>The public bridge transports only protocol values. Native fallback calls
+ * additionally use the package-private, request-scoped Java environment ABI.
  */
 public final class HostServices {
   private HostServices() {
@@ -16,7 +16,10 @@ public final class HostServices {
       throw new IllegalArgumentException("host service is required");
     }
 
-    return HostClient.invoke(service, normalizeArguments(arguments));
+    Object[] values = normalizeArguments(arguments);
+    HostInvocation invocation = HostClient.invokeService(service, values);
+    invocation.applyMutations(values);
+    return invocation.returnValue();
   }
 
   /** Convenience API for the common byte-to-byte host capability shape. */
@@ -35,14 +38,26 @@ public final class HostServices {
    * <p>The service identity is {@code owner.name(descriptor)}.
    */
   public static Object callNative(String owner, String name, String descriptor, Object[] arguments) {
+    return callNative(owner, name, descriptor, null, arguments);
+  }
+
+  public static Object callNative(
+      String owner, String name, String descriptor, Object target, Object[] arguments) {
     if (owner == null || name == null || descriptor == null) {
       throw new IllegalArgumentException("native method identity is incomplete");
     }
 
-    String service = owner.replace('/', '.') + "." + name + descriptor;
-    Object result = HostClient.invoke(service, normalizeArguments(arguments));
+    Object[] values = normalizeArguments(arguments);
+    HostInvocation invocation = HostClient.invokeNative(owner, name, descriptor, target, values);
+    invocation.applyMutations(values);
+    invocation.throwIfException();
 
-    return NativeReturnValue.coerce(descriptor, result);
+    return NativeReturnValue.coerce(descriptor, invocation.returnValue());
+  }
+
+  @SuppressWarnings("unchecked")
+  static <T extends Throwable> void throwUnchecked(Throwable error) throws T {
+    throw (T) error;
   }
 
   private static Object[] normalizeArguments(Object[] arguments) {
