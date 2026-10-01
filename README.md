@@ -18,6 +18,11 @@ toolchain.
 > production-ready; anyone interested in long-term, production-quality
 > maintenance is welcome to adopt it.
 
+For packaging arbitrary Java applications as APE executables, use
+[javacosmofy](https://github.com/bear0330/javacosmofy). See
+[tika-ape](https://github.com/bear0330/tika-ape) for a practical example that
+packages Apache Tika.
+
 ## Install the overlay
 
 [`superconfigure.lock`](superconfigure.lock) pins the released superconfigure
