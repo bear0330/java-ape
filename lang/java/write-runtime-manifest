@@ -1,0 +1,41 @@
+#!/bin/sh
+# Record which release runtime may be paired with a module repository.
+set -eu
+
+RUNTIME=${1:?runtime required}
+MODULES=${2:?module repository required}
+
+test -f "$RUNTIME" || {
+  echo "missing Java runtime: $RUNTIME" >&2
+  exit 1
+}
+
+test -f "$MODULES" || {
+  echo "missing Java module repository: $MODULES" >&2
+  exit 1
+}
+
+if command -v sha256sum >/dev/null 2>&1; then
+  RUNTIME_SHA256=$(sha256sum "$RUNTIME" | awk '{print $1}')
+else
+  RUNTIME_SHA256=$(shasum -a 256 "$RUNTIME" | awk '{print $1}')
+fi
+
+STAGE=$(mktemp -d "${TMPDIR:-/tmp}/java-ape-runtime-manifest.XXXXXX")
+trap 'rm -rf "$STAGE"' EXIT HUP INT TERM
+mkdir -p "$STAGE/.java-ape"
+
+cat > "$STAGE/.java-ape/runtime-manifest.json" <<EOF
+{
+  "format": 1,
+  "runtime": {
+    "path": "java.com",
+    "sha256": "$RUNTIME_SHA256"
+  }
+}
+EOF
+
+(
+  cd "$STAGE"
+  zip -q -u "$MODULES" .java-ape/runtime-manifest.json
+)

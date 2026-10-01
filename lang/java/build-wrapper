@@ -70,8 +70,8 @@ jdk_make \
 
 # 4) Compile the minimal runtime modules on both architectures. The x86_64
 #    build additionally compiles every OpenJDK Java module into a separate
-#    repository ZIP; javacosmofy selectively appends modules from that asset.
-#    The runtime payload itself intentionally remains minimal.
+#    repository ZIP for downstream package builders. The runtime payload
+#    itself intentionally remains minimal.
 CORE_MODULES='java.base java.compiler java.logging java.management java.naming java.net.http java.prefs java.rmi java.scripting java.security.sasl java.sql java.transaction.xa java.xml jdk.crypto.ec jdk.naming.dns jdk.naming.rmi jdk.unsupported jdk.zipfs'
 if [ "$ARCH" = x86_64 ]; then
   MODULES=$(find src -path '*/share/classes/module-info.java' -print | \

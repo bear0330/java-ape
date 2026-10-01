@@ -48,3 +48,4 @@ o/lang/java/configured.x86_64: o/lang/java/configured.aarch64
 o/lang/java/installed.aarch64: o/lang/java/installed.x86_64
 
 o/lang/java/built.fat: FATTEN_COMMAND = $(BASELOC)/lang/java/fatten
+o/lang/java/built.fat: $(BASELOC)/lang/java/fatten $(BASELOC)/lang/java/write-runtime-manifest

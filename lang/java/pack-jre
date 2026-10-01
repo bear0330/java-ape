@@ -40,12 +40,6 @@ HOST_SHIM="$BASELOC/o/lang/java/host-shim/java-ape-host.jar"
 "$BASELOC/lang/java/build-host-shim" "$HOST_SHIM"
 mkdir -p "$STAGE/lib/java-ape/classes"
 unzip -q "$HOST_SHIM" -d "$STAGE/lib/java-ape/classes"
-PATCH_SHA256=$(sha256sum "$BASELOC/lang/java/minimal.diff" | awk '{print $1}')
-SOURCE_SHA256=$(awk 'NR == 1 { print $1 }' "$BASELOC/lang/java/check.signature")
-mkdir -p "$STAGE/.__javacosmofy__"
-printf 'format=1\nsource_sha256=%s\npatch_sha256=%s\n' "$SOURCE_SHA256" "$PATCH_SHA256" \
-  > "$STAGE/.__javacosmofy__/runtime.properties"
-
 for m in $MODULES; do
   test -d "$MB/jdk/modules/$m" || { echo "missing module output: $m" >&2; exit 1; }
   cp -a "$MB/jdk/modules/$m" "$STAGE/modules/$m"

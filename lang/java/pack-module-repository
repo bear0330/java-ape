@@ -1,6 +1,6 @@
 #!/bin/sh
 # Produce every Java module built from this exact OpenJDK tree. This is not
-# embedded in java.com; javacosmofy copies selected module closures from it.
+# embedded in java.com; downstream package builders can select module closures.
 set -eu
 SRC=${1:?OpenJDK source root required}
 OUT=${2:?output ZIP required}
@@ -9,7 +9,7 @@ MB="$SRC/build/$CONF"
 BASELOC=${BASELOC:?}
 STAGE=$(mktemp -d "${TMPDIR:-/tmp}/openjdk-cosmo-modules.XXXXXX")
 trap 'rm -rf "$STAGE"' EXIT INT TERM
-mkdir -p "$STAGE/modules" "$STAGE/.__javacosmofy__" "$(dirname "$OUT")"
+mkdir -p "$STAGE/modules" "$(dirname "$OUT")"
 
 count=0
 for module in "$MB"/jdk/modules/*; do
@@ -18,10 +18,5 @@ for module in "$MB"/jdk/modules/*; do
   count=$((count + 1))
 done
 test "$count" -gt 0 || { echo 'no compiled Java modules found' >&2; exit 1; }
-PATCH_SHA256=$(sha256sum "$BASELOC/lang/java/minimal.diff" | awk '{print $1}')
-SOURCE_SHA256=$(awk 'NR == 1 { print $1 }' "$BASELOC/lang/java/check.signature")
-printf 'format=1\nsource_sha256=%s\npatch_sha256=%s\nmodule_count=%s\n' \
-  "$SOURCE_SHA256" "$PATCH_SHA256" "$count" \
-  > "$STAGE/.__javacosmofy__/module-repository.properties"
-( cd "$STAGE" && zip -q -r "$OUT" modules .__javacosmofy__ )
+( cd "$STAGE" && zip -q -r "$OUT" modules )
 printf 'Packed %s Java modules: %s\n' "$count" "$OUT"

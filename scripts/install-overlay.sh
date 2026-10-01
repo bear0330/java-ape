@@ -25,6 +25,26 @@ DESTINATION=$SUPER/lang/java
 if [ -e "$DESTINATION" ]; then mkdir -p "$BACKUPS/lang"; mv "$DESTINATION" "$BACKUPS/lang/java"; fi
 mkdir -p "$SUPER/lang"
 cp -a "$ROOT/lang/java" "$DESTINATION"
+for script in \
+  build-host-shim \
+  build-wrapper \
+  config-wrapper \
+  darwin-build-cc \
+  darwin-build-cxx \
+  darwin-build-guard \
+  deps-wrapper \
+  download-host-rpc-deps \
+  download-wrapper \
+  fatten \
+  fix-constants.py \
+  install-wrapper \
+  pack-jre \
+  pack-module-repository \
+  patch-wrapper \
+  write-runtime-manifest
+do
+  chmod +x "$DESTINATION/$script"
+done
 grep -Fqx 'include lang/java/BUILD.mk' "$SUPER/lang/BUILD.mk" || printf '\ninclude lang/java/BUILD.mk\n' >> "$SUPER/lang/BUILD.mk"
 
 # The locked base's BSD-sed parser, Cosmocc's Linux-ELF dedupe helper, and

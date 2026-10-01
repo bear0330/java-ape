@@ -67,8 +67,13 @@ results/libexec/java-modules.zip
 
 `java.com` intentionally stays small: it contains 18 core runtime modules.
 `java-modules.zip` holds all 69 Java modules built from the matching OpenJDK
-tree. `javacosmofy` can add an application's requested module closure from
-that ZIP; source and patch fingerprints reject incompatible combinations.
+tree. A downstream package builder can add an application's requested module
+closure from that ZIP.
+
+The module archive includes `.java-ape/runtime-manifest.json`, which records
+the SHA-256 of the matching `java.com`. A package builder must verify that
+hash before adding optional modules. This pairing metadata belongs to the
+module repository; `java.com` contains no package-builder metadata.
 
 ## Use
 

@@ -71,3 +71,6 @@ unzip -q "$PAYLOAD" -d "$STAGE"
 ( cd "$STAGE" && zip -q -r "$TMPAPE" . )
 mv "$TMPAPE" "$RESULTS/bin/java.com"
 chmod +x "$RESULTS/bin/java.com"
+"$BASELOC/lang/java/write-runtime-manifest" \
+  "$RESULTS/bin/java.com" \
+  "$RESULTS/libexec/java-modules.zip"
