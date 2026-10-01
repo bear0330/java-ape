@@ -13,6 +13,8 @@ echo "==> $JAVA -jar hello.jar"
 "$JAVA" -jar "$ROOT/hello.jar"
 echo "==> zip .args"
 /bin/sh "$ROOT/smoke-zipargs.sh" "$JAVA"
+echo "==> static libjavajpeg"
+/bin/sh "$ROOT/jpeg-static-smoke.sh" "$JAVA"
 
 HTTP_PID=
 cleanup() {

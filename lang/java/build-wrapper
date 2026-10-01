@@ -25,6 +25,30 @@ else
 fi
 jdk_make() { "$MAKE_CMD" CONF="$CONF" JOBS="$JOBS" "$@"; }
 
+build_javajpeg() {
+  # java.desktop-static-libs would make every desktop native library.  JPEG is
+  # self-contained, so build and register only libjavajpeg for the launcher.
+  jdk_make java.desktop-java
+  JAVA_JPEG_ARCHIVE="$SRC/build/$CONF/support/native/java.desktop/libjavajpeg/static/libjavajpeg.a"
+  (
+    cd "$SRC/make"
+    "$MAKE_CMD" -r -R \
+      -I "$SRC/make/common" \
+      -I "$SRC/make/common/modules" \
+      -I "$SRC/make/modules/java.desktop" \
+      -f ModuleWrapper.gmk \
+      SPEC="$SRC/build/$CONF/spec.gmk" \
+      MODULE=java.desktop \
+      MAKEFILE_PREFIX=Lib \
+      STATIC_LIBS=true \
+      "$JAVA_JPEG_ARCHIVE"
+  )
+
+  JAVA_DESKTOP_LIBLIST="$SRC/build/$CONF/support/modules_static-libs/java.desktop/module-included-libs.txt"
+  mkdir -p "$(dirname "$JAVA_DESKTOP_LIBLIST")"
+  printf '%s\n' javajpeg > "$JAVA_DESKTOP_LIBLIST"
+}
+
 # 1) Reproduce static HotSpot first.
 jdk_make hotspot-server-static-libs
 
@@ -46,6 +70,7 @@ if [ "$ARCH" = aarch64 ]; then
     java.base-static-libs \
     java.management-static-libs \
     java.prefs-static-libs
+  build_javajpeg
   "$MAKE_CMD" -r -R \
     -I "$SRC/make/common" \
     SPEC="$SRC/build/$CONF/spec.gmk" \
@@ -83,6 +108,7 @@ TARGETS=''
 for m in $MODULES; do TARGETS="$TARGETS $m-java"; done
 # shellcheck disable=SC2086
 jdk_make $TARGETS
+build_javajpeg
 
 # 5) Runtime data/configuration used under /zip.
 jdk_make \

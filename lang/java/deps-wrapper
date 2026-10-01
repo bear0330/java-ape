@@ -51,6 +51,26 @@ if [ "$(uname -s)" = Darwin ]; then
     test -x "$x" || { echo "missing required tool: $x" >&2; exit 1; }
   done
 else
+  # Cosmocc deliberately refuses to run while WSL sends PE/Windows launch
+  # requests through binfmt_misc.  Its wrapper prints an error but exits
+  # successfully, which otherwise makes OpenJDK configure report only the
+  # unhelpful "C compiler cannot create executables" summary.
+  if [ -r /proc/sys/fs/binfmt_misc/WSLInterop ] \
+      && grep -qx enabled /proc/sys/fs/binfmt_misc/WSLInterop; then
+    cat >&2 <<'EOF'
+WSLInterop is enabled, but Cosmopolitan's APE compiler cannot run with it.
+Disable it for this WSL session, then rerun the build:
+
+  sudo sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/WSLInterop'
+
+Verify with:
+
+  test ! -e /proc/sys/fs/binfmt_misc/WSLInterop \
+    || ! grep -qx enabled /proc/sys/fs/binfmt_misc/WSLInterop
+EOF
+    exit 1
+  fi
+
   # .github/scripts/cosmo already prepares this tree.  Do not replace it
   # with a stale Cosmopolitan source archive or a separate cosmocc release.
   fetch "$BOOT_TAR" "$BOOT_URL"
